@@ -1,0 +1,46 @@
+# ============================================================================
+# BOMBO Travel Video Analyzer - Python Dependencies
+# ============================================================================
+
+# ── Framework Web ─────────────────────────────────────────────────────────────
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6  # Pour upload de fichiers
+
+# ── Machine Learning ──────────────────────────────────────────────────────────
+torch>=2.1.0
+transformers>=4.36.0
+qwen-vl-utils>=0.0.1
+accelerate>=0.25.0
+sentencepiece>=0.1.99
+
+# ── Téléchargement vidéo ──────────────────────────────────────────────────────
+yt-dlp>=2023.12.0
+
+# ── Base de données ───────────────────────────────────────────────────────────
+supabase>=2.3.0
+postgrest>=0.13.0
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# ── Utilitaires ───────────────────────────────────────────────────────────────
+httpx>=0.25.0  # Client HTTP moderne
+python-dateutil>=2.8.0
+
+# ── Validation et parsing ─────────────────────────────────────────────────────
+validators>=0.22.0
+
+# ── Logging avancé (optionnel) ────────────────────────────────────────────────
+loguru>=0.7.0  # Alternative à logging standard
+
+# ── CORS et sécurité ──────────────────────────────────────────────────────────
+python-jose[cryptography]>=3.3.0  # Pour JWT
+passlib[bcrypt]>=1.7.4  # Pour hashing de mots de passe
+
+# ── Testing (dev) ─────────────────────────────────────────────────────────────
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.25.0  # Pour tester les endpoints
