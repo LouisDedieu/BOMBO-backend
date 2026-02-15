@@ -1,126 +1,192 @@
-# 🗺️ Travel Video Analyzer — Backend FastAPI
+# BOMBO - Travel Video Analyzer API (Refactorisé)
 
-Transforme une vidéo TikTok/Reel en itinéraire JSON structuré via l'IA multimodale Qwen2-VL.
-
----
-
-## 🏗️ Architecture
+## 📁 Structure du projet
 
 ```
-travel-api/
-├── main.py           # Serveur FastAPI + logique d'inférence
-├── config.py         # Paramètres centralisés (modèle, FPS, tokens...)
-├── requirements.txt  # Dépendances Python
-└── README.md         # Ce fichier
+bombo_refactor/
+├── main.py                      # Point d'entrée de l'application
+├── config.py                    # Configuration (à créer/copier)
+├── downloader.py                # Module de téléchargement vidéo (à copier)
+│
+├── models/                      # Schémas et modèles de données
+│   ├── __init__.py
+│   └── schemas.py              # Schémas Pydantic pour les requêtes/réponses
+│
+├── services/                    # Logique métier
+│   ├── __init__.py
+│   ├── ml_service.py           # Service de Machine Learning (inférence)
+│   ├── supabase_service.py     # Service de gestion de la base de données
+│   ├── sse_service.py          # Service de gestion des événements SSE
+│   └── job_processor.py        # Service de traitement des jobs d'analyse
+│
+├── api/                         # Routes et endpoints
+│   ├── __init__.py
+│   ├── analyze.py              # Routes pour l'analyse de vidéos
+│   └── trips.py                # Routes pour la gestion des trips
+│
+└── utils/                       # Utilitaires
+    ├── __init__.py
+    └── prompts.py              # Prompts ML et fonctions utilitaires
 ```
 
-**Différence clé avec le script de lab :**
-| Script de lab | API FastAPI |
-|---|---|
-| Modèle chargé à chaque exécution | Modèle chargé **une seule fois** au démarrage |
-| ~38s total (8s chargement + 30s inférence) | ~30s total (0s chargement + 30s inférence) |
-| Un seul fichier, pas de concurrence | Prêt pour requêtes multiples |
+## 🎯 Séparation des responsabilités
 
----
+### 1. **models/** - Modèles de données
+- `schemas.py` : Définit tous les schémas Pydantic pour la validation des requêtes et réponses
 
-## ⚡ Installation & Démarrage
+### 2. **services/** - Logique métier
 
+#### `ml_service.py`
+- Gère le chargement et le déchargement du modèle ML
+- Exécute l'inférence sur les vidéos
+- Parse et extrait le JSON de la sortie du modèle
+- Classe `MLService` avec instance singleton `ml_service`
+
+#### `supabase_service.py`
+- Gère toutes les interactions avec Supabase
+- Insertion/mise à jour des données
+- Normalisation des valeurs enum (saisons)
+- Création complète des trips avec toutes leurs relations
+- Classe `SupabaseService`
+
+#### `sse_service.py`
+- Gère les jobs d'analyse asynchrones
+- Gestion des queues SSE pour les mises à jour en temps réel
+- Classe `JobManager` avec instance singleton `job_manager`
+
+#### `job_processor.py`
+- Orchestre le processus complet d'analyse
+- Gère le téléchargement, l'inférence et la sauvegarde
+- Coordonne les services ML et Supabase
+- Envoie les mises à jour SSE aux clients
+- Classe `JobProcessor`
+
+### 3. **api/** - Couche HTTP
+
+#### `analyze.py`
+- Route `/analyze/url` : Démarre une analyse
+- Route `/analyze/stream/{job_id}` : Stream SSE des mises à jour
+- Route `/analyze/status/{job_id}` : Polling de statut (fallback)
+
+#### `trips.py`
+- Route `/trips/{trip_id}` : Récupère un voyage
+- Route `/trips/user/{user_id}` : Liste des voyages d'un utilisateur
+
+### 4. **utils/** - Utilitaires
+
+#### `prompts.py`
+- Contient le prompt pour l'analyse de voyage
+- Fonction `get_fallback_result()` pour les résultats par défaut
+
+### 5. **main.py** - Orchestration
+
+- Configuration de l'application FastAPI
+- Gestion du cycle de vie (startup/shutdown)
+- Initialisation des services
+- Configuration des middlewares (CORS)
+- Enregistrement des routers
+- Route de health check
+
+## 🚀 Avantages de cette architecture
+
+### ✅ Maintenabilité
+- Code organisé par responsabilité
+- Facile de trouver où modifier une fonctionnalité
+- Réduction des conflits lors du travail en équipe
+
+### ✅ Testabilité
+- Chaque service peut être testé indépendamment
+- Mock facile des dépendances
+- Tests unitaires simplifiés
+
+### ✅ Réutilisabilité
+- Services réutilisables dans d'autres parties de l'application
+- Logique métier séparée de la couche HTTP
+
+### ✅ Évolutivité
+- Facile d'ajouter de nouveaux endpoints
+- Facile d'ajouter de nouveaux services
+- Architecture claire pour l'ajout de fonctionnalités
+
+## 📝 Migration depuis l'ancien code
+
+### Fichiers à copier
 ```bash
-# 1. Créer l'environnement virtuel
-python -m venv venv
-source venv/bin/activate
-
-# 2. Installer les dépendances
-pip install -r requirements.txt
-
-# 3. Lancer le serveur
-uvicorn main:app --host 0.0.0.0 --port 8000
-
-# En mode dev (rechargement auto sur modif du code — attention: recharge le modèle !)
-# uvicorn main:app --reload
+# Copier les fichiers de configuration et dépendances existants
+cp config.py bombo_refactor/
+cp downloader.py bombo_refactor/
+cp requirements.txt bombo_refactor/  # si vous en avez un
 ```
 
-Tu verras dans le terminal :
-```
-🚀 Démarrage du serveur — chargement du modèle Qwen/Qwen2-VL-7B-Instruct...
-   Device détecté : MPS
-✅ Modèle prêt en 7.3s — l'API est opérationnelle !
-```
+### Dépendances requises
+Les mêmes que dans l'ancien code :
+- fastapi
+- uvicorn
+- torch
+- transformers
+- qwen-vl-utils
+- supabase (optionnel)
+- httpx
+- yt-dlp
+- pydantic
+- json-repair (optionnel mais recommandé)
 
----
+## 🎓 Exemples d'utilisation
 
-## 🔌 Endpoints
-
-### `GET /health`
-Vérifie que le serveur et le modèle sont prêts.
-```json
-{
-  "status": "ok",
-  "model": "Qwen/Qwen2-VL-7B-Instruct",
-  "device": "mps",
-  "model_loaded": true
-}
-```
-
-### `POST /analyze/upload`
-Envoie une vidéo directement (multipart form-data).
-
+### Démarrer l'application
 ```bash
-curl -X POST http://localhost:8000/analyze/upload \
-  -F "file=@ma_video.mp4"
+cd bombo_refactor
+python main.py
 ```
 
-### `POST /analyze/path`
-Analyse via un chemin local (préparation pour yt-dlp à l'Étape 2).
+### Ajouter une nouvelle route
+1. Créer un nouveau fichier dans `api/` (ex: `api/analytics.py`)
+2. Définir le router : `router = APIRouter(prefix="/analytics", tags=["analytics"])`
+3. Ajouter les routes
+4. Dans `main.py`, importer et enregistrer : `app.include_router(analytics.router)`
 
-```bash
-curl -X POST http://localhost:8000/analyze/path \
-  -H "Content-Type: application/json" \
-  -d '{"video_path": "/chemin/vers/video.mp4"}'
-```
+### Ajouter un nouveau service
+1. Créer un fichier dans `services/` (ex: `services/cache_service.py`)
+2. Définir une classe ou des fonctions
+3. Importer et utiliser dans les routes ou autres services
 
-**Réponse (les deux endpoints) :**
-```json
-{
-  "job_id": "a1b2c3d4-...",
-  "duration_seconds": 29.4,
-  "raw_json": {
-    "location": "Lisbonne, Portugal",
-    "spots": [
-      {
-        "name": "Pastéis de Belém",
-        "type": "restaurant",
-        "address": "R. de Belém 84-92",
-        "price_range": "€",
-        "tips": "Arriver avant 9h pour éviter la queue"
-      }
-    ],
-    "vibe": "Ville historique et solaire, idéale pour les foodies",
-    "budget": { "min_per_day": 60, "max_per_day": 120, "currency": "EUR" },
-    "best_season": "printemps",
-    "tips": ["Prendre le tram 28", "Éviter août (trop touristique)"]
-  }
-}
-```
+### Modifier la logique ML
+- Modifier uniquement `services/ml_service.py`
+- Aucun impact sur les routes ou la base de données
 
----
+### Modifier la logique Supabase
+- Modifier uniquement `services/supabase_service.py`
+- Aucun impact sur le ML ou les routes
 
-## 🎛️ Tuning des performances (`config.py`)
+## 🔧 Configuration
 
-| Paramètre | Valeur actuelle | Si tu veux + de vitesse | Si tu veux + de précision |
-|---|---|---|---|
-| `MODEL_ID` | `Qwen2-VL-7B` | Passe en `2B` | Reste en `7B` |
-| `FPS` | `0.2` (1/5s) | `0.1` (1/10s) | `0.5` (1/2s) |
-| `MAX_PIXELS` | `360×420` | Réduire | `640×480` |
-| `MAX_NEW_TOKENS` | `512` | `256` | `1024` |
+Les variables d'environnement restent les mêmes que dans l'ancien code :
+- `MODEL_ID` : ID du modèle Hugging Face
+- `SUPABASE_URL` : URL de votre projet Supabase
+- `SUPABASE_SERVICE_KEY` : Clé service_role de Supabase
+- `COOKIES_FILE` : Chemin vers le fichier de cookies
+- `PROXY_URL` : URL du proxy (optionnel)
+- `HOST` et `PORT` : Configuration du serveur
 
----
+## 📚 Bonnes pratiques
 
-## 🗺️ Roadmap
+1. **Un fichier = une responsabilité** : Chaque fichier a un objectif clair
+2. **Services = logique métier** : Pas de logique dans les routes
+3. **Routes = orchestration HTTP** : Validation, appel aux services, réponse
+4. **Schémas Pydantic** : Toujours valider les entrées/sorties
+5. **Logging** : Utiliser le logger dans chaque module
+6. **Gestion d'erreurs** : Lever des HTTPException dans les routes, gérer les exceptions dans les services
 
-- [x] **Étape 1** — Backend FastAPI avec modèle persistant ✅
-- [ ] **Étape 2** — Intégration `yt-dlp` pour analyser depuis une URL TikTok
-- [ ] **Étape 3** — Application mobile (Flutter/React Native) avec Share Extension
-- [ ] **Étape 4** — Persistance des itinéraires (Supabase/Firebase)
+## 🐛 Debugging
 
-> 📖 La documentation interactive Swagger est disponible sur `http://localhost:8000/docs`
+- Les logs indiquent clairement le module concerné grâce aux noms de logger
+- Chaque service peut être testé indépendamment
+- Facile de tracer le flux d'une requête : Route → Service → Base de données
+
+## 🎉 Prochaines étapes
+
+1. Copier les fichiers manquants (`config.py`, `downloader.py`)
+2. Installer les dépendances
+3. Tester l'application
+4. Ajouter des tests unitaires pour chaque service
+5. Ajouter de la documentation API (Swagger est automatique avec FastAPI)
