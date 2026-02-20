@@ -83,7 +83,7 @@ async def is_trip_saved(
         .select("id") \
         .eq("user_id", user_id) \
         .eq("trip_id", trip_id) \
-        .maybeSingle() \
+        .maybe_single() \
         .execute()
     return {"saved": res.data is not None}
 
@@ -109,7 +109,7 @@ async def delete_trip(
     """Supprime un trip (l'utilisateur doit en être le propriétaire)."""
     sb = _require_supabase()
     # Vérifier ownership
-    res = sb.from_("trips").select("id").eq("id", trip_id).eq("user_id", user_id).maybeSingle().execute()
+    res = sb.from_("trips").select("id").eq("id", trip_id).eq("user_id", user_id).maybe_single().execute()
     if not res.data:
         raise HTTPException(404, detail="Trip introuvable ou accès refusé")
     sb.from_("trips").delete().eq("id", trip_id).execute()

@@ -42,16 +42,8 @@ job_processor = JobProcessor(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Chargement du modèle UNE SEULE FOIS au démarrage."""
-    # Chargement du modèle ML
-    ml_service.load_model(
-        model_id=settings.MODEL_ID,
-        max_pixels=settings.MAX_PIXELS,
-        fps=settings.FPS,
-    )
-
-    # Découverte des valeurs enum season_type
-    if supabase_service.is_configured():
-        await supabase_service.discover_season_enum_values()
+    # Initialisation du client Gemini
+    ml_service.load_model()
 
     # Configuration des routes avec les services
     analyze.set_job_processor(job_processor)

@@ -16,7 +16,6 @@ class SupabaseService:
     def __init__(self, url: Optional[str] = None, key: Optional[str] = None):
         self.url = url
         self.key = key
-        self.season_enum_values: set[str] = set()
         self.supabase_client = None
 
         if url and key:
@@ -37,27 +36,16 @@ class SupabaseService:
 
     def _check_service_role_key(self):
         """Vérifie que la clé utilisée est une clé service_role"""
-        try:
-            import base64
-            import json
-
-            payload = json.loads(
-                base64.b64decode(self.key.split(".")[1] + "==").decode()
+        if self.key.startswith("sb_secret_"):
+            logger.info("SUPABASE_SERVICE_ROLE_KEY = service_role ✓  (RLS bypassed)")
+        elif self.key.startswith("sb_publishable_"):
+            logger.warning(
+                "⚠️  SUPABASE_SERVICE_ROLE_KEY est la clé anon (sb_publishable_) — attendu sb_secret_. "
+                "Les insertions seront bloquées par RLS. "
+                "→ Supabase dashboard → Settings → API → copiez la clé 'service_role'."
             )
-            role = payload.get("role", "unknown")
-
-            if role != "service_role":
-                logger.warning(
-                    "⚠️  SUPABASE_SERVICE_ROLE_KEY a le rôle JWT '%s' — attendu 'service_role'. "
-                    "Les insertions seront bloquées par RLS.\n"
-                    "→ Supabase dashboard → Settings → API → "
-                    "section 'Project API keys' → copiez 'service_role (secret)'.",
-                    role,
-                )
-            else:
-                logger.info("SUPABASE_SERVICE_ROLE_KEY = service_role ✓  (RLS bypassed)")
-        except Exception as e:
-            logger.warning("Impossible de décoder le rôle du JWT service key : %s", e)
+        else:
+            logger.info("SUPABASE_SERVICE_ROLE_KEY configurée ✓")
 
     def is_configured(self) -> bool:
         """Vérifie si Supabase est configuré"""
@@ -106,63 +94,6 @@ class SupabaseService:
                 timeout=10,
             )
             response.raise_for_status()
-
-    async def discover_season_enum_values(self):
-        """Découvre les valeurs de l'enum season_type"""
-        if not self.supabase_client:
-            return
-
-        try:
-            result = self.supabase_client.rpc("get_season_enum_values", {}).execute()
-            if result.data:
-                self.season_enum_values.update(result.data)
-                logger.info("Valeurs enum season_type : %s", sorted(self.season_enum_values))
-        except Exception:
-            try:
-                result = self.supabase_client.rpc(
-                    "sql",
-                    {"query": "SELECT unnest(enum_range(NULL::season_type))::text AS v"},
-                ).execute()
-                if result.data:
-                    self.season_enum_values.update(r["v"] for r in result.data)
-                    logger.info(
-                        "Valeurs enum season_type : %s", sorted(self.season_enum_values)
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Impossible de découvrir l'enum season_type (%s). "
-                    "best_season sera ignoré pour éviter les erreurs 22P02.",
-                    e,
-                )
-
-    def normalize_season(self, raw: Optional[str]) -> Optional[str]:
-        """
-        Normalise la valeur de saison vers un membre valide de l'enum season_type.
-        """
-        if not raw or not self.season_enum_values:
-            return None
-
-        # Essai exact
-        if raw in self.season_enum_values:
-            return raw
-
-        # Essai case-insensitive
-        lower = raw.lower().strip()
-        for v in self.season_enum_values:
-            if v.lower() == lower:
-                return v
-
-        # Essai par mot-clé
-        for v in self.season_enum_values:
-            if v.lower() in lower:
-                return v
-
-        logger.warning(
-            "Valeur de saison %r ne correspond à aucune des valeurs enum connues %s → None",
-            raw,
-            sorted(self.season_enum_values),
-        )
-        return None
 
     async def create_job(
             self, job_id: str, url: str, user_id: Optional[str] = None
@@ -230,7 +161,7 @@ class SupabaseService:
                 # duration_days n'est pas renseigné ici — le trigger Postgres
                 # trg_update_trip_duration le calcule automatiquement
                 # à chaque INSERT/DELETE sur itinerary_days
-                "best_season": self.normalize_season(trip_data.get("best_season")),
+                "best_season": trip_data.get("best_season"),
                 "source_url": trip_data.get("source_url"),
                 "content_creator_handle": trip_data.get("content_creator", {}).get(
                     "handle"
@@ -398,17 +329,18 @@ class SupabaseService:
             return None
 
     async def get_trip(self, trip_id: str) -> Optional[Dict]:
-        """Récupère un trip par son ID"""
+        """Récupère un trip par son ID avec toutes ses relations imbriquées"""
         if not self.supabase_client:
             return None
         try:
             response = (
-                self.supabase_client.from_("trip_details")
-                .select("*")
-                .eq("trip_id", trip_id)
+                self.supabase_client.from_("trips")
+                .select("*, destinations(*), itinerary_days(*, spots(*)), logistics(*), budgets(*), practical_info(*)")
+                .eq("id", trip_id)
+                .maybe_single()
                 .execute()
             )
-            return response.data[0] if response.data else None
+            return response.data
         except Exception as e:
             logger.error(f"Erreur récupération trip {trip_id}: {e}")
             return None

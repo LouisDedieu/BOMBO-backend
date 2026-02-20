@@ -4,11 +4,11 @@ uvicorn[standard]>=0.27.0
 pydantic>=2.5.0
 python-multipart>=0.0.6
 
-# ML and Video Processing
-torch>=2.1.0
-transformers>=4.37.0
-qwen-vl-utils>=0.0.1
+# Video Processing
 yt-dlp>=2024.1.0
+
+# Gemini AI API
+google-genai>=1.0.0
 
 # Database
 supabase>=2.3.0

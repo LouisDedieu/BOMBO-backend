@@ -59,7 +59,7 @@ async def get_profile(user_id: str = Depends(get_current_user_id)) -> ProfileRes
         return sb.from_("profiles") \
             .select("username, full_name, bio, avatar_url, created_at") \
             .eq("id", user_id) \
-            .maybeSingle() \
+            .maybe_single() \
             .execute()
 
     def fetch_trips():

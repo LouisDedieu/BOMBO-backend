@@ -12,13 +12,9 @@ class Settings(BaseSettings):
         extra="ignore",       # silently drop unknown env vars
     )
 
-    # ── Modèle IA ─────────────────────────────────────────────────────────────
-    MODEL_ID: str = "Qwen/Qwen2-VL-7B-Instruct"
-
-    # ── Optimisations inférence ───────────────────────────────────────────────
-    MAX_PIXELS: int = 360 * 420
-    FPS: float = 0.3 # 1 image tous les 3 secondes → 20 images par minute → 400 images pour une vidéo de 20 minutes
-    MAX_NEW_TOKENS: int = 4096
+    # ── Gemini API ────────────────────────────────────────────────────────────
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL_ID: str = "gemini-2.0-flash"
 
     # ── Serveur ───────────────────────────────────────────────────────────────
     HOST: str = "0.0.0.0"
