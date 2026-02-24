@@ -79,13 +79,16 @@ async def is_trip_saved(
 ) -> Dict:
     """Vérifie si un trip est sauvegardé par l'utilisateur."""
     sb = _require_supabase()
-    res = sb.from_("user_saved_trips") \
-        .select("id") \
-        .eq("user_id", user_id) \
-        .eq("trip_id", trip_id) \
-        .maybe_single() \
-        .execute()
-    return {"saved": res.data is not None}
+    try:
+        res = sb.from_("user_saved_trips") \
+            .select("id") \
+            .eq("user_id", user_id) \
+            .eq("trip_id", trip_id) \
+            .maybe_single() \
+            .execute()
+        return {"saved": res is not None and res.data is not None}
+    except Exception:
+        return {"saved": False}
 
 
 @router.get("/{trip_id}")

@@ -78,7 +78,7 @@ async def get_profile(user_id: str = Depends(get_current_user_id)) -> ProfileRes
         return sb.from_("analysis_jobs") \
             .select("id", count="exact", head=True) \
             .eq("user_id", user_id) \
-            .eq("status", "completed") \
+            .eq("status", "done") \
             .execute()
 
     profile_res, trips_res, saved_res, jobs_res = await asyncio.gather(
