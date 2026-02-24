@@ -109,13 +109,21 @@ async def delete_trip(
     trip_id: str,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Supprime un trip (l'utilisateur doit en être le propriétaire)."""
+    """Supprime un trip et son analysis_job associé."""
     sb = _require_supabase()
-    # Vérifier ownership
-    res = sb.from_("trips").select("id").eq("id", trip_id).eq("user_id", user_id).maybe_single().execute()
+    # Vérifier ownership et récupérer job_id
+    res = sb.from_("trips").select("id, job_id").eq("id", trip_id).eq("user_id", user_id).maybe_single().execute()
     if not res.data:
         raise HTTPException(404, detail="Trip introuvable ou accès refusé")
+
+    job_id = res.data.get("job_id")
+
+    # Supprimer le trip
     sb.from_("trips").delete().eq("id", trip_id).execute()
+
+    # Supprimer l'analysis_job associé si présent
+    if job_id:
+        sb.from_("analysis_jobs").delete().eq("id", job_id).execute()
 
 
 @router.post("/{trip_id}/save", status_code=201)
