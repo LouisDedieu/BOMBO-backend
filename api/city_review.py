@@ -51,6 +51,17 @@ class ReorderHighlightsBody(BaseModel):
     highlights: List[Dict]  # [{id: str, order: int}]
 
 
+class CreateHighlightBody(BaseModel):
+    name: str
+    category: str = "other"
+    subtype: Optional[str] = None
+    address: Optional[str] = None
+    description: Optional[str] = None
+    price_range: Optional[str] = None
+    tips: Optional[str] = None
+    is_must_see: bool = False
+
+
 # -- Routes --------------------------------------------------------------------
 
 @router.get("/{city_id}")
@@ -128,6 +139,55 @@ async def get_city_for_review(city_id: str) -> Dict:
         "category_counts": category_counts,
         "budget": budget,
     }
+
+
+@router.post("/{city_id}/highlights", status_code=201)
+async def create_highlight(
+    city_id: str,
+    body: CreateHighlightBody,
+    user_id: str = Depends(get_current_user_id),
+) -> Dict:
+    """Cree un nouveau highlight pour une city."""
+    sb = _require_supabase()
+
+    # Valider la categorie
+    valid_categories = ['food', 'culture', 'nature', 'shopping', 'nightlife', 'other']
+    if body.category not in valid_categories:
+        raise HTTPException(400, detail=f"Categorie invalide. Valeurs acceptees: {valid_categories}")
+
+    # Recuperer l'ordre max actuel
+    max_order_res = sb.from_("city_highlights") \
+        .select("highlight_order") \
+        .eq("city_id", city_id) \
+        .order("highlight_order", desc=True) \
+        .limit(1) \
+        .execute()
+
+    max_order = 0
+    if max_order_res.data and len(max_order_res.data) > 0:
+        max_order = (max_order_res.data[0].get("highlight_order") or 0) + 1
+
+    # Creer le highlight
+    new_highlight = {
+        "city_id": city_id,
+        "name": body.name,
+        "category": body.category,
+        "subtype": body.subtype,
+        "address": body.address,
+        "description": body.description,
+        "price_range": body.price_range,
+        "tips": body.tips,
+        "is_must_see": body.is_must_see,
+        "highlight_order": max_order,
+        "validated": True,
+    }
+
+    result = sb.from_("city_highlights").insert(new_highlight).execute()
+
+    if not result.data:
+        raise HTTPException(500, detail="Erreur lors de la creation du highlight")
+
+    return result.data[0]
 
 
 @router.patch("/highlights/{highlight_id}", status_code=200)
