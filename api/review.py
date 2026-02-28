@@ -48,6 +48,12 @@ class CoordinatesBody(BaseModel):
     lon: float
 
 
+class AddCityToTripBody(BaseModel):
+    city_id: str
+    day_id: Optional[str] = None  # If provided, add highlights to this day
+    create_new_day: bool = False  # If true and day_id is None, create a new day
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/{trip_id}")
@@ -291,3 +297,159 @@ async def update_destination_coordinates(
         .eq("id", dest_id) \
         .execute()
     return {"updated": True}
+
+
+@router.post("/{trip_id}/add-city", status_code=200)
+async def add_city_to_trip(
+    trip_id: str,
+    body: AddCityToTripBody,
+    user_id: str = Depends(get_current_user_id),
+) -> Dict:
+    """
+    Ajoute une city existante à un trip.
+    - Si day_id fourni : ajoute les highlights comme spots à ce jour
+    - Si create_new_day=true : crée un nouveau jour et ajoute les highlights
+    """
+    sb = _require_supabase()
+
+    # 1. Récupérer la city et ses highlights
+    city_res = sb.from_("cities") \
+        .select("id, city_name, country") \
+        .eq("id", body.city_id) \
+        .maybe_single() \
+        .execute()
+
+    if not city_res.data:
+        raise HTTPException(404, detail="City introuvable")
+
+    city = city_res.data
+    city_name = city["city_name"]
+    country = city.get("country", "")
+
+    # 2. Récupérer les highlights de la city
+    highlights_res = sb.from_("city_highlights") \
+        .select("*") \
+        .eq("city_id", body.city_id) \
+        .eq("validated", True) \
+        .order("highlight_order") \
+        .execute()
+
+    highlights = highlights_res.data or []
+    if not highlights:
+        raise HTTPException(400, detail="Cette city n'a pas de highlights")
+
+    # 3. Déterminer le jour cible
+    target_day_id = body.day_id
+    destination_id = None
+
+    if body.create_new_day or not body.day_id:
+        # Chercher si une destination existe déjà pour cette ville
+        dest_res = sb.from_("destinations") \
+            .select("id") \
+            .eq("trip_id", trip_id) \
+            .ilike("city", f"%{city_name}%") \
+            .limit(1) \
+            .execute()
+
+        if dest_res.data and len(dest_res.data) > 0:
+            destination_id = dest_res.data[0]["id"]
+        else:
+            # Créer une nouvelle destination
+            max_order_res = sb.from_("destinations") \
+                .select("visit_order") \
+                .eq("trip_id", trip_id) \
+                .order("visit_order", desc=True) \
+                .limit(1) \
+                .execute()
+
+            max_order = 0
+            if max_order_res.data and len(max_order_res.data) > 0:
+                max_order = max_order_res.data[0].get("visit_order", 0)
+
+            new_dest_res = sb.from_("destinations").insert({
+                "trip_id": trip_id,
+                "city": city_name,
+                "country": country,
+                "days_spent": 1,
+                "visit_order": max_order + 1,
+            }).execute()
+
+            if new_dest_res.data:
+                destination_id = new_dest_res.data[0]["id"]
+
+        # Créer un nouveau jour
+        max_day_res = sb.from_("itinerary_days") \
+            .select("day_number") \
+            .eq("trip_id", trip_id) \
+            .order("day_number", desc=True) \
+            .limit(1) \
+            .execute()
+
+        max_day = 0
+        if max_day_res.data and len(max_day_res.data) > 0:
+            max_day = max_day_res.data[0].get("day_number", 0)
+
+        new_day_res = sb.from_("itinerary_days").insert({
+            "trip_id": trip_id,
+            "destination_id": destination_id,
+            "day_number": max_day + 1,
+            "location": city_name,
+            "theme": f"Découverte de {city_name}",
+            "validated": True,
+        }).execute()
+
+        if new_day_res.data:
+            target_day_id = new_day_res.data[0]["id"]
+
+    # 4. Récupérer le max spot_order du jour cible
+    max_spot_order = 0
+    if target_day_id:
+        spot_order_res = sb.from_("spots") \
+            .select("spot_order") \
+            .eq("itinerary_day_id", target_day_id) \
+            .order("spot_order", desc=True) \
+            .limit(1) \
+            .execute()
+
+        if spot_order_res.data and len(spot_order_res.data) > 0:
+            max_spot_order = (spot_order_res.data[0].get("spot_order") or 0) + 1
+
+    # 5. Convertir les highlights en spots et les insérer
+    # Mapping des catégories highlight vers les types de spots valides
+    # Valid spot_type enum: attraction|restaurant|bar|hotel|activite|transport|shopping
+    CATEGORY_TO_SPOT_TYPE = {
+        "food": "restaurant",
+        "culture": "attraction",
+        "nature": "attraction",
+        "shopping": "shopping",
+        "nightlife": "bar",
+        "other": "attraction",
+    }
+
+    spots_to_insert = []
+    for idx, h in enumerate(highlights):
+        category = h.get("category", "other")
+        spot_type = CATEGORY_TO_SPOT_TYPE.get(category, "attraction")
+        spots_to_insert.append({
+            "itinerary_day_id": target_day_id,
+            "name": h["name"],
+            "spot_type": spot_type,
+            "address": h.get("address"),
+            "duration_minutes": 60,  # Default
+            "price_range": h.get("price_range"),
+            "tips": h.get("tips"),
+            "highlight": h.get("is_must_see", False),
+            "spot_order": max_spot_order + idx,
+            "latitude": h.get("latitude"),
+            "longitude": h.get("longitude"),
+        })
+
+    if spots_to_insert:
+        sb.from_("spots").insert(spots_to_insert).execute()
+
+    return {
+        "added": True,
+        "spots_count": len(spots_to_insert),
+        "day_id": target_day_id,
+        "city_name": city_name,
+    }
