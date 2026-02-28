@@ -54,6 +54,22 @@ class AddCityToTripBody(BaseModel):
     create_new_day: bool = False  # If true and day_id is None, create a new day
 
 
+class AddDestinationBody(BaseModel):
+    city_name: str
+    country: Optional[str] = None
+    latitude: float
+    longitude: float
+
+
+class DestinationOrderItem(BaseModel):
+    id: str
+    order: int
+
+
+class ReorderDestinationsBody(BaseModel):
+    destinations: List[DestinationOrderItem]
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/{trip_id}")
@@ -453,3 +469,200 @@ async def add_city_to_trip(
         "day_id": target_day_id,
         "city_name": city_name,
     }
+
+
+@router.post("/{trip_id}/add-destination", status_code=200)
+async def add_destination_to_trip(
+    trip_id: str,
+    body: AddDestinationBody,
+    user_id: str = Depends(get_current_user_id),
+) -> Dict:
+    """
+    Ajoute une nouvelle destination (ville saisie manuellement) à un trip.
+    1. Vérifie que le trip existe
+    2. Vérifie qu'il n'y a pas déjà une destination avec ce nom
+    3. Crée la destination avec coordonnées
+    4. Crée un jour vide lié à cette destination
+    Retourne { added, destination_id, day_id, city_name }
+    """
+    sb = _require_supabase()
+
+    # 1. Vérifier que le trip existe
+    trip_res = await asyncio.to_thread(
+        lambda: sb.from_("trips")
+            .select("id")
+            .eq("id", trip_id)
+            .maybe_single()
+            .execute()
+    )
+    if not trip_res.data:
+        raise HTTPException(404, detail="Trip introuvable")
+
+    city_name = body.city_name.strip()
+
+    # 2. Vérifier doublon (insensible à la casse)
+    existing_res = await asyncio.to_thread(
+        lambda: sb.from_("destinations")
+            .select("id")
+            .eq("trip_id", trip_id)
+            .ilike("city", city_name)
+            .limit(1)
+            .execute()
+    )
+    if existing_res.data and len(existing_res.data) > 0:
+        raise HTTPException(409, detail=f"La destination '{city_name}' existe déjà dans cet itinéraire")
+
+    # 3. Calculer le prochain visit_order
+    max_order_res = await asyncio.to_thread(
+        lambda: sb.from_("destinations")
+            .select("visit_order")
+            .eq("trip_id", trip_id)
+            .order("visit_order", desc=True)
+            .limit(1)
+            .execute()
+    )
+    max_order = 0
+    if max_order_res.data and len(max_order_res.data) > 0:
+        max_order = max_order_res.data[0].get("visit_order") or 0
+
+    # 4. Créer la destination
+    new_dest_res = await asyncio.to_thread(
+        lambda: sb.from_("destinations").insert({
+            "trip_id": trip_id,
+            "city": city_name,
+            "country": body.country,
+            "days_spent": 1,
+            "visit_order": max_order + 1,
+            "latitude": body.latitude,
+            "longitude": body.longitude,
+        }).execute()
+    )
+    if not new_dest_res.data:
+        raise HTTPException(500, detail="Erreur lors de la création de la destination")
+
+    destination_id = new_dest_res.data[0]["id"]
+
+    # 5. Calculer le prochain day_number
+    max_day_res = await asyncio.to_thread(
+        lambda: sb.from_("itinerary_days")
+            .select("day_number")
+            .eq("trip_id", trip_id)
+            .order("day_number", desc=True)
+            .limit(1)
+            .execute()
+    )
+    max_day = 0
+    if max_day_res.data and len(max_day_res.data) > 0:
+        max_day = max_day_res.data[0].get("day_number") or 0
+
+    # 6. Créer un jour vide lié à la nouvelle destination
+    new_day_res = await asyncio.to_thread(
+        lambda: sb.from_("itinerary_days").insert({
+            "trip_id": trip_id,
+            "destination_id": destination_id,
+            "day_number": max_day + 1,
+            "location": city_name,
+            "theme": f"Découverte de {city_name}",
+            "validated": True,
+        }).execute()
+    )
+    if not new_day_res.data:
+        raise HTTPException(500, detail="Erreur lors de la création du jour")
+
+    day_id = new_day_res.data[0]["id"]
+
+    return {
+        "added": True,
+        "destination_id": destination_id,
+        "day_id": day_id,
+        "city_name": city_name,
+    }
+
+
+@router.delete("/{trip_id}/destinations/{dest_id}", status_code=204)
+async def delete_destination(
+    trip_id: str,
+    dest_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Supprime une destination et tous ses jours/spots liés, puis recalcule visit_order.
+    """
+    sb = _require_supabase()
+
+    # 1. Vérifier que la destination appartient au trip
+    dest_res = await asyncio.to_thread(
+        lambda: sb.from_("destinations")
+            .select("id")
+            .eq("id", dest_id)
+            .eq("trip_id", trip_id)
+            .maybe_single()
+            .execute()
+    )
+    if not dest_res.data:
+        raise HTTPException(404, detail="Destination introuvable")
+
+    # 2. Récupérer les jours liés à cette destination
+    days_res = await asyncio.to_thread(
+        lambda: sb.from_("itinerary_days")
+            .select("id")
+            .eq("trip_id", trip_id)
+            .eq("destination_id", dest_id)
+            .execute()
+    )
+    day_ids = [d["id"] for d in (days_res.data or [])]
+
+    # 3. Supprimer les spots de ces jours
+    if day_ids:
+        await asyncio.to_thread(
+            lambda: sb.from_("spots").delete().in_("itinerary_day_id", day_ids).execute()
+        )
+        # 4. Supprimer les jours
+        await asyncio.to_thread(
+            lambda: sb.from_("itinerary_days").delete().in_("id", day_ids).execute()
+        )
+
+    # 5. Supprimer la destination
+    await asyncio.to_thread(
+        lambda: sb.from_("destinations").delete().eq("id", dest_id).execute()
+    )
+
+    # 6. Recalculer visit_order des destinations restantes
+    remaining_res = await asyncio.to_thread(
+        lambda: sb.from_("destinations")
+            .select("id, visit_order")
+            .eq("trip_id", trip_id)
+            .order("visit_order")
+            .execute()
+    )
+    remaining = remaining_res.data or []
+    await asyncio.gather(*[
+        asyncio.to_thread(
+            lambda d=dest, idx=i: sb.from_("destinations")
+                .update({"visit_order": idx + 1})
+                .eq("id", d["id"])
+                .execute()
+        )
+        for i, dest in enumerate(remaining)
+    ])
+
+
+@router.patch("/{trip_id}/destinations/reorder", status_code=200)
+async def reorder_destinations(
+    trip_id: str,
+    body: ReorderDestinationsBody,
+    user_id: str = Depends(get_current_user_id),
+) -> Dict:
+    """Met à jour visit_order de chaque destination d'un trip."""
+    sb = _require_supabase()
+    await asyncio.gather(*[
+        asyncio.to_thread(
+            lambda d=dest: sb.from_("destinations")
+                .update({"visit_order": d.order})
+                .eq("id", d.id)
+                .eq("trip_id", trip_id)
+                .execute()
+        )
+        for dest in body.destinations
+    ])
+    return {"reordered": True}

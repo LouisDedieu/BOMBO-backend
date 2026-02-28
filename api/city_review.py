@@ -60,6 +60,8 @@ class CreateHighlightBody(BaseModel):
     price_range: Optional[str] = None
     tips: Optional[str] = None
     is_must_see: bool = False
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 # -- Routes --------------------------------------------------------------------
@@ -180,6 +182,8 @@ async def create_highlight(
         "is_must_see": body.is_must_see,
         "highlight_order": max_order,
         "validated": True,
+        "latitude": body.latitude,
+        "longitude": body.longitude,
     }
 
     result = sb.from_("city_highlights").insert(new_highlight).execute()
