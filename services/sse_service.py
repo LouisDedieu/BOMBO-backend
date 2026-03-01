@@ -15,13 +15,14 @@ class JobManager:
     def __init__(self):
         self.jobs: Dict[str, Dict] = {}
 
-    def create_job(self, job_id: str) -> None:
+    def create_job(self, job_id: str, user_id: str) -> None:
         """Crée un nouveau job"""
         self.jobs[job_id] = {
             "status": "pending",
             "result": None,
             "error": None,
             "sse_queues": [],
+            "user_id": user_id,
         }
         logger.info(f"Job {job_id} créé")
 

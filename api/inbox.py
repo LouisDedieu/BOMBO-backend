@@ -75,25 +75,16 @@ async def get_inbox(user_id: str = Depends(get_current_user_id)) -> List[InboxJo
     trip_by_job_id = {t["job_id"]: t for t in trips}
     trip_ids = [t["id"] for t in trips]
 
-    # 3. Cities liés à ces jobs
+    # 3. Cities liés à ces jobs — city_details inclut highlights_count, évite le N+1
     city_ids_from_jobs = [j["city_id"] for j in jobs if j.get("city_id")]
-    cities_res = sb.from_("cities") \
-        .select("id, city_title") \
+    cities_res = sb.from_("city_details") \
+        .select("id, city_title, highlights_count") \
         .in_("id", city_ids_from_jobs) \
         .execute() if city_ids_from_jobs else None
 
     cities = cities_res.data if cities_res else []
     city_by_id = {c["id"]: c for c in cities}
-
-    # 4. Get highlights count for cities
-    highlights_counts = {}
-    if city_ids_from_jobs:
-        for city_id in city_ids_from_jobs:
-            count_res = sb.from_("city_highlights") \
-                .select("id", count="exact") \
-                .eq("city_id", city_id) \
-                .execute()
-            highlights_counts[city_id] = count_res.count or 0
+    highlights_counts = {c["id"]: c.get("highlights_count") or 0 for c in cities}
 
     # 5. Trips déjà sauvegardés
     saved_trip_ids: set = set()

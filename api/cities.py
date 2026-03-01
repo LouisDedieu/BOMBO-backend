@@ -91,8 +91,9 @@ async def check_city_match(
     logger.info(f"[Merge] Checking match for city_name='{city_name}', user_id={user_id}")
 
     # Use limit(1) instead of maybe_single() to avoid error when multiple cities exist
-    res = sb.from_("cities") \
-        .select("id, city_name, city_title") \
+    # city_details inclut highlights_count — évite une requête séparée
+    res = sb.from_("city_details") \
+        .select("id, city_name, city_title, highlights_count") \
         .eq("user_id", user_id) \
         .ilike("city_name", city_name) \
         .order("created_at", desc=False) \
@@ -104,18 +105,12 @@ async def check_city_match(
     logger.info(f"[Merge] Query result: {first_match}")
 
     if first_match:
-        # Compter les highlights
-        highlights_res = sb.from_("city_highlights") \
-            .select("id", count="exact") \
-            .eq("city_id", first_match["id"]) \
-            .execute()
-
         return {
             "match": True,
             "city_id": first_match["id"],
             "city_name": first_match["city_name"],
             "city_title": first_match["city_title"],
-            "highlights_count": highlights_res.count or 0
+            "highlights_count": first_match.get("highlights_count") or 0
         }
 
     return {"match": False}
@@ -281,9 +276,9 @@ async def merge_cities(
     logger.info(f"[Merge] Found {len(source_highlights)} highlights to merge")
     merged_count = 0
 
-    # Copier chaque highlight vers la target city
-    for idx, h in enumerate(source_highlights):
-        new_highlight = {
+    # Copier les highlights vers la target city en un seul INSERT batch
+    highlights_to_insert = [
+        {
             "city_id": city_id,
             "name": h["name"],
             "category": h["category"],
@@ -298,8 +293,11 @@ async def merge_cities(
             "highlight_order": current_max + idx + 1,
             "validated": True,
         }
-        sb.from_("city_highlights").insert(new_highlight).execute()
-        merged_count += 1
+        for idx, h in enumerate(source_highlights)
+    ]
+    if highlights_to_insert:
+        sb.from_("city_highlights").insert(highlights_to_insert).execute()
+    merged_count = len(highlights_to_insert)
 
     # Delete source city if requested (removes from inbox too)
     if body.delete_source:

@@ -27,6 +27,37 @@ def _require_supabase():
     return _supabase_service.supabase_client
 
 
+def _check_day_ownership(sb, day_id: str, user_id: str) -> None:
+    res = sb.from_("itinerary_days") \
+        .select("id, trips(user_id)") \
+        .eq("id", day_id) \
+        .maybe_single() \
+        .execute()
+    if not res.data or (res.data.get("trips") or {}).get("user_id") != user_id:
+        raise HTTPException(404, detail="Jour introuvable")
+
+
+def _check_spot_ownership(sb, spot_id: str, user_id: str) -> None:
+    res = sb.from_("spots") \
+        .select("id, itinerary_days(trips(user_id))") \
+        .eq("id", spot_id) \
+        .maybe_single() \
+        .execute()
+    days = (res.data.get("itinerary_days") or {}) if res.data else {}
+    if not res.data or (days.get("trips") or {}).get("user_id") != user_id:
+        raise HTTPException(404, detail="Spot introuvable")
+
+
+def _check_destination_ownership(sb, dest_id: str, user_id: str) -> None:
+    res = sb.from_("destinations") \
+        .select("id, trips(user_id)") \
+        .eq("id", dest_id) \
+        .maybe_single() \
+        .execute()
+    if not res.data or (res.data.get("trips") or {}).get("user_id") != user_id:
+        raise HTTPException(404, detail="Destination introuvable")
+
+
 # ── Modèles ───────────────────────────────────────────────────────────────────
 
 class ValidateDayBody(BaseModel):
@@ -184,6 +215,7 @@ async def validate_day(
 ) -> Dict:
     """Met à jour le flag validated d'un jour d'itinéraire."""
     sb = _require_supabase()
+    _check_day_ownership(sb, day_id, user_id)
     res = sb.from_("itinerary_days") \
         .update({"validated": body.validated}) \
         .eq("id", day_id) \
@@ -268,6 +300,7 @@ async def update_spot(
 ) -> Dict:
     """Met à jour les champs d'un spot."""
     sb = _require_supabase()
+    _check_spot_ownership(sb, spot_id, user_id)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     if not payload:
         return {"updated": False}
@@ -282,6 +315,7 @@ async def delete_spot(
 ):
     """Supprime un spot."""
     sb = _require_supabase()
+    _check_spot_ownership(sb, spot_id, user_id)
     sb.from_("spots").delete().eq("id", spot_id).execute()
 
 
@@ -293,6 +327,7 @@ async def update_spot_coordinates(
 ) -> Dict:
     """Met à jour latitude/longitude d'un spot."""
     sb = _require_supabase()
+    _check_spot_ownership(sb, spot_id, user_id)
     sb.from_("spots") \
         .update({"latitude": body.lat, "longitude": body.lon}) \
         .eq("id", spot_id) \
@@ -308,6 +343,7 @@ async def update_destination_coordinates(
 ) -> Dict:
     """Met à jour latitude/longitude d'une destination."""
     sb = _require_supabase()
+    _check_destination_ownership(sb, dest_id, user_id)
     sb.from_("destinations") \
         .update({"latitude": body.lat, "longitude": body.lon}) \
         .eq("id", dest_id) \

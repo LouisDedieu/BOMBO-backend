@@ -66,7 +66,7 @@ async def get_saved_trips(user_id: str = Depends(get_current_user_id)) -> List[D
 @router.get("/saved/all")
 async def get_unified_saved(
     user_id: str = Depends(get_current_user_id),
-    type: str = Query("all", regex="^(all|trip|city)$"),
+    item_type: str = Query("all", alias="type", regex="^(all|trip|city)$"),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
 ) -> Dict:
@@ -76,15 +76,21 @@ async def get_unified_saved(
     """
     sb = _require_supabase()
     offset = (page - 1) * limit
+    # On récupère offset+limit de chaque table — suffisant pour reconstruire la page correctement
+    db_limit = offset + limit
     items = []
+    any_table_hit_limit = False
 
     # Récupérer les trips sauvegardés si demandé
-    if type in ("all", "trip"):
+    if item_type in ("all", "trip"):
         trips_res = sb.from_("user_saved_trips") \
             .select("id, notes, created_at, trips(id, trip_title, vibe, duration_days, thumbnail_url, source_url, content_creator_handle)") \
             .eq("user_id", user_id) \
             .order("created_at", desc=True) \
+            .limit(db_limit) \
             .execute()
+        if len(trips_res.data or []) == db_limit:
+            any_table_hit_limit = True
 
         for row in (trips_res.data or []):
             trip = row.get("trips")
@@ -106,23 +112,20 @@ async def get_unified_saved(
                 })
 
     # Récupérer les cities sauvegardées si demandé
-    if type in ("all", "city"):
+    if item_type in ("all", "city"):
+        # city_details contient déjà highlights_count — une seule requête au lieu de 1+N
         cities_res = sb.from_("user_saved_cities") \
-            .select("id, notes, created_at, cities(id, city_title, city_name, country, vibe_tags, thumbnail_url, source_url, content_creator_handle)") \
+            .select("id, notes, created_at, city_details(id, city_title, city_name, country, vibe_tags, thumbnail_url, source_url, content_creator_handle, highlights_count)") \
             .eq("user_id", user_id) \
             .order("created_at", desc=True) \
+            .limit(db_limit) \
             .execute()
+        if len(cities_res.data or []) == db_limit:
+            any_table_hit_limit = True
 
         for row in (cities_res.data or []):
-            city = row.get("cities")
+            city = row.get("city_details")
             if city:
-                # Compter les highlights
-                highlights_res = sb.from_("city_highlights") \
-                    .select("id", count="exact") \
-                    .eq("city_id", city["id"]) \
-                    .eq("validated", True) \
-                    .execute()
-
                 items.append({
                     "id": row["id"],
                     "entity_type": "city",
@@ -132,7 +135,7 @@ async def get_unified_saved(
                     "thumbnail_url": city.get("thumbnail_url"),
                     "vibe": city.get("vibe_tags", [None])[0] if city.get("vibe_tags") else None,
                     "duration_days": None,
-                    "highlights_count": highlights_res.count or 0,
+                    "highlights_count": city.get("highlights_count") or 0,
                     "created_at": row["created_at"],
                     "notes": row.get("notes"),
                     "source_url": city.get("source_url"),
@@ -150,20 +153,9 @@ async def get_unified_saved(
         "page": page,
         "limit": limit,
         "total": len(items),
-        "has_more": offset + limit < len(items)
+        "has_more": offset + limit < len(items) or any_table_hit_limit,
     }
 
-
-@router.get("/user/{user_id_param}")
-async def get_user_trips(user_id_param: str) -> List[Dict]:
-    """Trips d'un utilisateur (rétrocompatibilité)."""
-    sb = _require_supabase()
-    res = sb.from_("trip_details") \
-        .select("*") \
-        .eq("user_id", user_id_param) \
-        .order("created_at", desc=True) \
-        .execute()
-    return res.data or []
 
 
 @router.get("/{trip_id}/saved")

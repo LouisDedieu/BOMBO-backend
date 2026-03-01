@@ -23,8 +23,29 @@ def set_supabase_service(service: SupabaseService):
 
 def _require_supabase():
     if not _supabase_service or not _supabase_service.is_configured():
-        raise HTTPException(503, detail="Supabase non configure")
+        raise HTTPException(503, detail="Supabase non configuré")
     return _supabase_service.supabase_client
+
+
+def _check_city_ownership(sb, city_id: str, user_id: str) -> None:
+    res = sb.from_("cities") \
+        .select("id") \
+        .eq("id", city_id) \
+        .eq("user_id", user_id) \
+        .maybe_single() \
+        .execute()
+    if not res.data:
+        raise HTTPException(404, detail="City introuvable")
+
+
+def _check_highlight_ownership(sb, highlight_id: str, user_id: str) -> None:
+    res = sb.from_("city_highlights") \
+        .select("id, cities(user_id)") \
+        .eq("id", highlight_id) \
+        .maybe_single() \
+        .execute()
+    if not res.data or (res.data.get("cities") or {}).get("user_id") != user_id:
+        raise HTTPException(404, detail="Highlight introuvable")
 
 
 # -- Modeles -------------------------------------------------------------------
@@ -151,6 +172,7 @@ async def create_highlight(
 ) -> Dict:
     """Cree un nouveau highlight pour une city."""
     sb = _require_supabase()
+    _check_city_ownership(sb, city_id, user_id)
 
     # Valider la categorie
     valid_categories = ['food', 'culture', 'nature', 'shopping', 'nightlife', 'other']
@@ -202,6 +224,7 @@ async def update_highlight(
 ) -> Dict:
     """Met a jour les champs d'un highlight."""
     sb = _require_supabase()
+    _check_highlight_ownership(sb, highlight_id, user_id)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     if not payload:
         return {"updated": False}
@@ -223,6 +246,7 @@ async def update_highlight_coordinates(
 ) -> Dict:
     """Met a jour latitude/longitude d'un highlight."""
     sb = _require_supabase()
+    _check_highlight_ownership(sb, highlight_id, user_id)
     sb.from_("city_highlights") \
         .update({"latitude": body.lat, "longitude": body.lon}) \
         .eq("id", highlight_id) \
@@ -237,6 +261,7 @@ async def reorder_highlights(
 ) -> Dict:
     """Reordonne les highlights d'une city (pour drag & drop)."""
     sb = _require_supabase()
+    _check_city_ownership(sb, body.city_id, user_id)
 
     for item in body.highlights:
         highlight_id = item.get("id")
@@ -257,6 +282,7 @@ async def delete_highlight(
 ):
     """Supprime un highlight."""
     sb = _require_supabase()
+    _check_highlight_ownership(sb, highlight_id, user_id)
     sb.from_("city_highlights").delete().eq("id", highlight_id).execute()
 
 
@@ -271,6 +297,7 @@ async def sync_city_data(
     - Recalcule l'ordre des highlights restants
     """
     sb = _require_supabase()
+    _check_city_ownership(sb, city_id, user_id)
 
     # 1. Supprimer les highlights non-valides
     sb.from_("city_highlights") \
