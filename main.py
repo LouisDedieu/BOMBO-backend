@@ -12,7 +12,7 @@ from config import settings
 from services.ml_service import ml_service
 from services.supabase_service import SupabaseService
 from services.job_processor import JobProcessor
-from api import analyze, trips
+from api import analyze, trips, inbox, profile, review, cities, city_review
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -42,20 +42,17 @@ job_processor = JobProcessor(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Chargement du modèle UNE SEULE FOIS au démarrage."""
-    # Chargement du modèle ML
-    ml_service.load_model(
-        model_id=settings.MODEL_ID,
-        max_pixels=settings.MAX_PIXELS,
-        fps=settings.FPS,
-    )
-
-    # Découverte des valeurs enum season_type
-    if supabase_service.is_configured():
-        await supabase_service.discover_season_enum_values()
+    # Initialisation du client Gemini
+    ml_service.load_model()
 
     # Configuration des routes avec les services
     analyze.set_job_processor(job_processor)
     trips.set_supabase_service(supabase_service)
+    inbox.set_supabase_service(supabase_service)
+    profile.set_supabase_service(supabase_service)
+    review.set_supabase_service(supabase_service)
+    cities.set_supabase_service(supabase_service)
+    city_review.set_supabase_service(supabase_service)
 
     logger.info("Application initialisée et prête ✓")
 
@@ -98,7 +95,7 @@ async def health_check():
     """Vérification de l'état de santé de l'API"""
     return {
         "status": "ok" if ml_service.is_ready() else "loading",
-        "model": settings.MODEL_ID,
+        "model": settings.GEMINI_MODEL_ID,
         "device": ml_service.device or "unknown",
         "model_loaded": ml_service.is_ready(),
         "supabase_connected": supabase_service.is_configured(),
@@ -108,6 +105,11 @@ async def health_check():
 # Inclusion des routers
 app.include_router(analyze.router)
 app.include_router(trips.router)
+app.include_router(inbox.router)
+app.include_router(profile.router)
+app.include_router(review.router)
+app.include_router(cities.router)
+app.include_router(city_review.router)
 
 
 # ── Point d'entrée ────────────────────────────────────────────────────────────

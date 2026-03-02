@@ -48,8 +48,7 @@ logs/
 *.db
 *.sqlite
 
-# Model cache and downloads
-models/
+# Model cache and downloads (fichiers ML — pas le package Python models/)
 *.pth
 *.bin
 *.safetensors

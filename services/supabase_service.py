@@ -16,7 +16,6 @@ class SupabaseService:
     def __init__(self, url: Optional[str] = None, key: Optional[str] = None):
         self.url = url
         self.key = key
-        self.season_enum_values: set[str] = set()
         self.supabase_client = None
 
         if url and key:
@@ -37,27 +36,16 @@ class SupabaseService:
 
     def _check_service_role_key(self):
         """Vérifie que la clé utilisée est une clé service_role"""
-        try:
-            import base64
-            import json
-
-            payload = json.loads(
-                base64.b64decode(self.key.split(".")[1] + "==").decode()
+        if self.key.startswith("sb_secret_"):
+            logger.info("SUPABASE_SERVICE_ROLE_KEY = service_role ✓  (RLS bypassed)")
+        elif self.key.startswith("sb_publishable_"):
+            logger.warning(
+                "⚠️  SUPABASE_SERVICE_ROLE_KEY est la clé anon (sb_publishable_) — attendu sb_secret_. "
+                "Les insertions seront bloquées par RLS. "
+                "→ Supabase dashboard → Settings → API → copiez la clé 'service_role'."
             )
-            role = payload.get("role", "unknown")
-
-            if role != "service_role":
-                logger.warning(
-                    "⚠️  SUPABASE_SERVICE_ROLE_KEY a le rôle JWT '%s' — attendu 'service_role'. "
-                    "Les insertions seront bloquées par RLS.\n"
-                    "→ Supabase dashboard → Settings → API → "
-                    "section 'Project API keys' → copiez 'service_role (secret)'.",
-                    role,
-                )
-            else:
-                logger.info("SUPABASE_SERVICE_ROLE_KEY = service_role ✓  (RLS bypassed)")
-        except Exception as e:
-            logger.warning("Impossible de décoder le rôle du JWT service key : %s", e)
+        else:
+            logger.info("SUPABASE_SERVICE_ROLE_KEY configurée ✓")
 
     def is_configured(self) -> bool:
         """Vérifie si Supabase est configuré"""
@@ -106,63 +94,6 @@ class SupabaseService:
                 timeout=10,
             )
             response.raise_for_status()
-
-    async def discover_season_enum_values(self):
-        """Découvre les valeurs de l'enum season_type"""
-        if not self.supabase_client:
-            return
-
-        try:
-            result = self.supabase_client.rpc("get_season_enum_values", {}).execute()
-            if result.data:
-                self.season_enum_values.update(result.data)
-                logger.info("Valeurs enum season_type : %s", sorted(self.season_enum_values))
-        except Exception:
-            try:
-                result = self.supabase_client.rpc(
-                    "sql",
-                    {"query": "SELECT unnest(enum_range(NULL::season_type))::text AS v"},
-                ).execute()
-                if result.data:
-                    self.season_enum_values.update(r["v"] for r in result.data)
-                    logger.info(
-                        "Valeurs enum season_type : %s", sorted(self.season_enum_values)
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Impossible de découvrir l'enum season_type (%s). "
-                    "best_season sera ignoré pour éviter les erreurs 22P02.",
-                    e,
-                )
-
-    def normalize_season(self, raw: Optional[str]) -> Optional[str]:
-        """
-        Normalise la valeur de saison vers un membre valide de l'enum season_type.
-        """
-        if not raw or not self.season_enum_values:
-            return None
-
-        # Essai exact
-        if raw in self.season_enum_values:
-            return raw
-
-        # Essai case-insensitive
-        lower = raw.lower().strip()
-        for v in self.season_enum_values:
-            if v.lower() == lower:
-                return v
-
-        # Essai par mot-clé
-        for v in self.season_enum_values:
-            if v.lower() in lower:
-                return v
-
-        logger.warning(
-            "Valeur de saison %r ne correspond à aucune des valeurs enum connues %s → None",
-            raw,
-            sorted(self.season_enum_values),
-        )
-        return None
 
     async def create_job(
             self, job_id: str, url: str, user_id: Optional[str] = None
@@ -230,7 +161,7 @@ class SupabaseService:
                 # duration_days n'est pas renseigné ici — le trigger Postgres
                 # trg_update_trip_duration le calcule automatiquement
                 # à chaque INSERT/DELETE sur itinerary_days
-                "best_season": self.normalize_season(trip_data.get("best_season")),
+                "best_season": trip_data.get("best_season"),
                 "source_url": trip_data.get("source_url"),
                 "content_creator_handle": trip_data.get("content_creator", {}).get(
                     "handle"
@@ -398,17 +329,180 @@ class SupabaseService:
             return None
 
     async def get_trip(self, trip_id: str) -> Optional[Dict]:
-        """Récupère un trip par son ID"""
+        """
+        Récupère un trip par son ID avec toutes ses relations imbriquées.
+        Synchronise automatiquement les spots avec les highlights des villes liées.
+        """
         if not self.supabase_client:
             return None
         try:
+            # 1. Récupérer le trip avec toutes ses relations
             response = (
-                self.supabase_client.from_("trip_details")
-                .select("*")
-                .eq("trip_id", trip_id)
+                self.supabase_client.from_("trips")
+                .select(
+                    "*, destinations(*), "
+                    "itinerary_days(*, spots(*)), "
+                    "logistics(*), budgets(*), practical_info(*)"
+                )
+                .eq("id", trip_id)
+                .maybe_single()
                 .execute()
             )
-            return response.data[0] if response.data else None
+            trip_data = response.data
+            if not trip_data:
+                return None
+
+            # 2. Identifier les jours liés à des villes sauvegardées
+            days_with_city = [
+                day for day in trip_data.get("itinerary_days", [])
+                if day.get("linked_city_id")
+            ]
+
+            if not days_with_city:
+                # Pas de sync nécessaire, retourner tel quel
+                return trip_data
+
+            # 3. Récupérer les city_ids uniques
+            city_ids = list(set(day["linked_city_id"] for day in days_with_city))
+
+            # 4. Récupérer tous les highlights validés de ces villes
+            highlights_res = (
+                self.supabase_client.from_("city_highlights")
+                .select("*")
+                .in_("city_id", city_ids)
+                .eq("validated", True)
+                .order("highlight_order")
+                .execute()
+            )
+            all_highlights = highlights_res.data or []
+
+            # Grouper les highlights par city_id
+            highlights_by_city: Dict[str, list] = {}
+            for h in all_highlights:
+                cid = h["city_id"]
+                if cid not in highlights_by_city:
+                    highlights_by_city[cid] = []
+                highlights_by_city[cid].append(h)
+
+            # Mapping catégorie → spot_type
+            CATEGORY_TO_SPOT_TYPE = {
+                "food": "restaurant",
+                "culture": "attraction",
+                "nature": "attraction",
+                "shopping": "shopping",
+                "nightlife": "bar",
+                "other": "attraction",
+            }
+
+            # 5. Synchroniser chaque jour lié
+            for day in days_with_city:
+                city_id = day["linked_city_id"]
+                day_id = day["id"]
+                city_highlights = highlights_by_city.get(city_id, [])
+                existing_spots = day.get("spots", [])
+
+                # Map des spots existants par city_highlight_id
+                spots_by_highlight_id = {
+                    s["city_highlight_id"]: s
+                    for s in existing_spots
+                    if s.get("city_highlight_id")
+                }
+
+                # Set des highlight_ids actuels de la ville
+                current_highlight_ids = {h["id"] for h in city_highlights}
+
+                # Set des highlight_ids déjà liés dans les spots
+                linked_highlight_ids = set(spots_by_highlight_id.keys())
+
+                # a) Highlights à ajouter (nouveaux)
+                to_add = [h for h in city_highlights if h["id"] not in linked_highlight_ids]
+
+                # b) Spots à supprimer (highlight supprimé de la ville)
+                to_delete_ids = [
+                    s["id"] for s in existing_spots
+                    if s.get("city_highlight_id") and s["city_highlight_id"] not in current_highlight_ids
+                ]
+
+                # c) Spots à mettre à jour (highlight modifié)
+                to_update = [
+                    (spots_by_highlight_id[h["id"]], h)
+                    for h in city_highlights
+                    if h["id"] in linked_highlight_ids
+                ]
+
+                # Exécuter les suppressions
+                if to_delete_ids:
+                    self.supabase_client.from_("spots") \
+                        .delete() \
+                        .in_("id", to_delete_ids) \
+                        .execute()
+
+                # Exécuter les mises à jour
+                for spot, highlight in to_update:
+                    category = highlight.get("category", "other")
+                    spot_type = CATEGORY_TO_SPOT_TYPE.get(category, "attraction")
+                    self.supabase_client.from_("spots") \
+                        .update({
+                            "name": highlight["name"],
+                            "address": highlight.get("address"),
+                            "tips": highlight.get("tips"),
+                            "price_range": highlight.get("price_range"),
+                            "latitude": highlight.get("latitude"),
+                            "longitude": highlight.get("longitude"),
+                            "highlight": highlight.get("is_must_see", False),
+                            "spot_type": spot_type,
+                        }) \
+                        .eq("id", spot["id"]) \
+                        .execute()
+
+                # Calculer le prochain spot_order
+                max_order = max((s.get("spot_order", 0) for s in existing_spots), default=0)
+
+                # Exécuter les insertions
+                if to_add:
+                    spots_to_insert = []
+                    for idx, h in enumerate(to_add):
+                        category = h.get("category", "other")
+                        spot_type = CATEGORY_TO_SPOT_TYPE.get(category, "attraction")
+                        spots_to_insert.append({
+                            "itinerary_day_id": day_id,
+                            "name": h["name"],
+                            "spot_type": spot_type,
+                            "address": h.get("address"),
+                            "duration_minutes": 60,
+                            "price_range": h.get("price_range"),
+                            "tips": h.get("tips"),
+                            "highlight": h.get("is_must_see", False),
+                            "spot_order": max_order + idx + 1,
+                            "latitude": h.get("latitude"),
+                            "longitude": h.get("longitude"),
+                            "city_highlight_id": h["id"],
+                            "source_city_id": city_id,
+                        })
+                    self.supabase_client.from_("spots").insert(spots_to_insert).execute()
+
+            # 6. Re-fetch le trip avec les données synchronisées
+            response = (
+                self.supabase_client.from_("trips")
+                .select(
+                    "*, destinations(*), "
+                    "itinerary_days(*, spots(*)), "
+                    "logistics(*), budgets(*), practical_info(*)"
+                )
+                .eq("id", trip_id)
+                .maybe_single()
+                .execute()
+            )
+            trip_data = response.data
+
+            # 7. Marquer les spots synchronisés pour le frontend
+            if trip_data:
+                for day in trip_data.get("itinerary_days", []):
+                    for spot in day.get("spots", []):
+                        if spot.get("city_highlight_id"):
+                            spot["_synced_from_highlight"] = True
+
+            return trip_data
         except Exception as e:
             logger.error(f"Erreur récupération trip {trip_id}: {e}")
             return None
@@ -428,4 +522,154 @@ class SupabaseService:
             return response.data or []
         except Exception as e:
             logger.error(f"Erreur récupération trips user {user_id}: {e}")
+            return []
+
+    # =========================================================================
+    # CITIES
+    # =========================================================================
+
+    async def create_city(
+            self, city_data: Dict, job_id: str, user_id: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Crée une city complète dans Supabase avec toutes ses relations.
+        Retourne l'ID de la city créée.
+        """
+        if not self.is_configured():
+            return None
+
+        def _do_insert() -> Optional[str]:
+            """Insertion synchrone dans un thread séparé"""
+            import httpx as _httpx
+
+            def _sb_insert(table: str, payload: dict) -> dict:
+                r = _httpx.post(
+                    self._get_url(table),
+                    json=payload,
+                    headers=self._get_headers(),
+                    timeout=10,
+                )
+                if not r.is_success:
+                    logger.error("❌ %s → %s | body: %s", table, r.status_code, r.text)
+                r.raise_for_status()
+                rows = r.json()
+                return rows[0] if rows else {}
+
+            # 1. City principal
+            city_insert = {
+                "job_id": job_id,
+                "user_id": user_id,
+                "city_title": city_data.get("city_title"),
+                "city_name": city_data.get("city_name"),
+                "country": city_data.get("country"),
+                "vibe_tags": city_data.get("vibe_tags", []),
+                "best_season": city_data.get("best_season"),
+                "source_url": city_data.get("source_url"),
+                "content_creator_handle": city_data.get("content_creator", {}).get("handle"),
+                "content_creator_links": city_data.get("content_creator", {}).get("links_mentioned", []),
+            }
+
+            try:
+                city_row = _sb_insert("cities", city_insert)
+            except _httpx.HTTPStatusError as e:
+                body = e.response.text
+                logger.error(f"Erreur création city: {body[:200]}")
+                raise
+
+            city_id = city_row["id"]
+            logger.info(f"City créée dans Supabase: {city_id}")
+
+            # 2. Highlights
+            for idx, highlight in enumerate(city_data.get("highlights", [])):
+                _sb_insert(
+                    "city_highlights",
+                    {
+                        "city_id": city_id,
+                        "name": highlight.get("name"),
+                        "category": highlight.get("category", "other"),
+                        "subtype": highlight.get("subtype"),
+                        "address": highlight.get("address"),
+                        "description": highlight.get("description"),
+                        "price_range": highlight.get("price_range"),
+                        "tips": highlight.get("tips"),
+                        "is_must_see": highlight.get("is_must_see", False),
+                        "highlight_order": idx,
+                        "validated": True,
+                    },
+                )
+
+            # 3. Budget
+            budget = city_data.get("budget") or {}
+            if budget:
+                _sb_insert(
+                    "city_budgets",
+                    {
+                        "city_id": city_id,
+                        "currency": budget.get("currency", "EUR"),
+                        "daily_average": budget.get("daily_average"),
+                        "food_average": budget.get("food_average"),
+                        "transport_average": budget.get("transport_average"),
+                        "activities_average": budget.get("activities_average"),
+                        "accommodation_range": budget.get("accommodation_range"),
+                    },
+                )
+
+            # 4. Infos pratiques
+            practical = city_data.get("practical_info") or {}
+            if practical:
+                _sb_insert(
+                    "city_practical_info",
+                    {
+                        "city_id": city_id,
+                        "visa_required": practical.get("visa_required"),
+                        "local_currency": practical.get("local_currency"),
+                        "language": practical.get("language"),
+                        "best_apps": practical.get("best_apps", []),
+                        "what_to_pack": practical.get("what_to_pack", []),
+                        "safety_tips": practical.get("safety_tips", []),
+                        "things_to_avoid": practical.get("avoid", []),
+                    },
+                )
+
+            logger.info(f"City {city_id} complètement créée dans Supabase ✓")
+            return city_id
+
+        try:
+            return await asyncio.to_thread(_do_insert)
+        except Exception as e:
+            logger.error(f"Erreur création city dans Supabase: {e}")
+            return None
+
+    async def get_city(self, city_id: str) -> Optional[Dict]:
+        """Récupère une city par son ID avec toutes ses relations imbriquées"""
+        if not self.supabase_client:
+            return None
+        try:
+            response = (
+                self.supabase_client.from_("cities")
+                .select("*, city_highlights(*), city_budgets(*), city_practical_info(*)")
+                .eq("id", city_id)
+                .maybe_single()
+                .execute()
+            )
+            return response.data
+        except Exception as e:
+            logger.error(f"Erreur récupération city {city_id}: {e}")
+            return None
+
+    async def get_user_cities(self, user_id: str) -> List[Dict]:
+        """Récupère toutes les cities d'un utilisateur"""
+        if not self.supabase_client:
+            return []
+        try:
+            response = (
+                self.supabase_client.from_("city_details")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Erreur récupération cities user {user_id}: {e}")
             return []
