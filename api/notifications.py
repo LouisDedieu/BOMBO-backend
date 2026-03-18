@@ -83,21 +83,22 @@ async def register_push_token(
 
     try:
         # Vérifier si le token existe déjà
-        existing = sb.from_("push_tokens") \
+        existing_result = sb.from_("push_tokens") \
             .select("id, is_active") \
             .eq("user_id", user_id) \
             .eq("expo_push_token", request.expo_push_token) \
-            .maybe_single() \
             .execute()
 
-        if existing.data:
+        existing_data = existing_result.data[0] if existing_result.data else None
+
+        if existing_data:
             # Réactiver si inactif
-            if not existing.data["is_active"]:
+            if not existing_data["is_active"]:
                 sb.from_("push_tokens") \
                     .update({"is_active": True}) \
-                    .eq("id", existing.data["id"]) \
+                    .eq("id", existing_data["id"]) \
                     .execute()
-            return {"status": "updated", "token_id": existing.data["id"]}
+            return {"status": "updated", "token_id": existing_data["id"]}
 
         # Créer un nouveau token
         result = sb.from_("push_tokens") \
