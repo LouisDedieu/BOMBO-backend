@@ -266,15 +266,13 @@ async def get_notifications(
 
         notifications = notifications_res.data or []
 
-        # Compter le total et les non-lues
+        # Compter le total (unread_count désactivé pour l'instant)
         count_res = sb.from_("notifications") \
-            .select("id, read_at") \
+            .select("id", count="exact") \
             .eq("user_id", user_id) \
             .execute()
 
-        all_notifs = count_res.data or []
-        total_count = len(all_notifs)
-        unread_count = sum(1 for n in all_notifs if n.get("read_at") is None)
+        total_count = count_res.count if count_res.count is not None else len(notifications)
 
         return NotificationListResponse(
             notifications=[
@@ -289,7 +287,7 @@ async def get_notifications(
                 )
                 for n in notifications
             ],
-            unread_count=unread_count,
+            unread_count=0,  # Désactivé pour l'instant
             total_count=total_count,
             has_more=offset + limit < total_count,
         )
@@ -305,25 +303,9 @@ async def get_unread_count(
 ) -> UnreadCountResponse:
     """
     Récupère le nombre de notifications non lues.
+    NOTE: Désactivé pour l'instant, retourne toujours 0.
     """
-    if not _supabase_service or not _supabase_service.supabase_client:
-        raise HTTPException(503, detail="Supabase non configuré")
-
-    sb = _supabase_service.supabase_client
-
-    try:
-        result = sb.from_("notifications") \
-            .select("id", count="exact") \
-            .eq("user_id", user_id) \
-            .is_("read_at", "null") \
-            .execute()
-
-        unread_count = result.count if result.count is not None else 0
-        return UnreadCountResponse(unread_count=unread_count)
-
-    except Exception as e:
-        logger.error(f"Erreur lors du comptage des notifications non lues: {e}")
-        raise HTTPException(500, detail="Erreur lors du comptage des notifications")
+    return UnreadCountResponse(unread_count=0)
 
 
 @router.post("/{notification_id}/read")

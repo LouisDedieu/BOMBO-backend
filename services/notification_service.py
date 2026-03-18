@@ -312,6 +312,9 @@ class NotificationService:
         for token, response in zip(tokens, responses):
             if response.get("status") == "error":
                 error_type = response.get("details", {}).get("error")
+                error_message = response.get("message", "Unknown error")
+                logger.warning(f"Expo push error: type={error_type}, message={error_message}")
+                logger.debug(f"Full Expo response: {response}")
 
                 if error_type in ("DeviceNotRegistered", "InvalidCredentials"):
                     logger.warning(f"Token invalide, désactivation: {token[:20]}...")

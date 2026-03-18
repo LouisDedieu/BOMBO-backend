@@ -248,13 +248,28 @@ class SupabaseService:
                 day_id = day_row["id"]
 
                 # 4. Spots
+                # Mapping des types ML vers les valeurs d'enum Supabase
+                TYPE_TO_SPOT_TYPE = {
+                    "food": "restaurant",
+                    "restaurant": "restaurant",
+                    "culture": "attraction",
+                    "museum": "museum",
+                    "nature": "attraction",
+                    "shopping": "shopping",
+                    "nightlife": "bar",
+                    "bar": "bar",
+                    "attraction": "attraction",
+                    "accommodation": "accommodation",
+                }
                 for idx, spot in enumerate(day_data.get("spots", [])):
+                    raw_type = spot.get("type", "attraction")
+                    mapped_type = TYPE_TO_SPOT_TYPE.get(raw_type, "attraction")
                     _sb_insert(
                         "spots",
                         {
                             "itinerary_day_id": day_id,
                             "name": spot.get("name"),
-                            "spot_type": spot.get("type"),
+                            "spot_type": mapped_type,
                             "address": spot.get("address"),
                             "duration_minutes": spot.get("duration_minutes"),
                             "price_range": spot.get("price_range"),
