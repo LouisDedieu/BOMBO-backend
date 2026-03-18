@@ -364,3 +364,47 @@ async def mark_all_notifications_as_read(
     except Exception as e:
         logger.error(f"Erreur lors du marquage de toutes les notifications comme lues: {e}")
         raise HTTPException(500, detail="Erreur lors du marquage des notifications")
+
+
+@router.post("/by-entity/{entity_type}/{entity_id}/read")
+async def mark_notifications_read_by_entity(
+    entity_type: str,
+    entity_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Marque comme lues toutes les notifications liées à une entité (trip ou city).
+    Appelé quand l'utilisateur consulte ou supprime l'entité.
+    """
+    if not _supabase_service or not _supabase_service.supabase_client:
+        raise HTTPException(503, detail="Supabase non configuré")
+
+    sb = _supabase_service.supabase_client
+
+    try:
+        # Récupérer les notifications non lues avec ce entity_id dans data
+        result = sb.from_("notifications") \
+            .select("id, data") \
+            .eq("user_id", user_id) \
+            .is_("read_at", "null") \
+            .execute()
+
+        # Filtrer celles qui matchent l'entity_type et entity_id
+        ids_to_mark = []
+        for notif in (result.data or []):
+            data = notif.get("data") or {}
+            if data.get("entity_type") == entity_type and data.get("entity_id") == entity_id:
+                ids_to_mark.append(notif["id"])
+
+        if ids_to_mark:
+            sb.from_("notifications") \
+                .update({"read_at": datetime.utcnow().isoformat()}) \
+                .in_("id", ids_to_mark) \
+                .execute()
+            logger.info(f"Marqué {len(ids_to_mark)} notification(s) comme lue(s) pour {entity_type}/{entity_id}")
+
+        return {"status": "read", "count": len(ids_to_mark)}
+
+    except Exception as e:
+        logger.error(f"Erreur lors du marquage des notifications par entité: {e}")
+        raise HTTPException(500, detail="Erreur lors du marquage des notifications")
