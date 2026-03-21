@@ -674,6 +674,7 @@ async def delete_destination(
     )
 
     # 6. Recalculer visit_order des destinations restantes
+    # On fait les updates séquentiellement pour éviter les conflits de contrainte d'unicité
     remaining_res = await asyncio.to_thread(
         lambda: sb.from_("destinations")
             .select("id, visit_order")
@@ -682,15 +683,24 @@ async def delete_destination(
             .execute()
     )
     remaining = remaining_res.data or []
-    await asyncio.gather(*[
-        asyncio.to_thread(
+
+    # D'abord, mettre des valeurs négatives temporaires pour éviter les conflits
+    for i, dest in enumerate(remaining):
+        await asyncio.to_thread(
+            lambda d=dest, idx=i: sb.from_("destinations")
+                .update({"visit_order": -(idx + 1)})
+                .eq("id", d["id"])
+                .execute()
+        )
+
+    # Ensuite, mettre les vraies valeurs
+    for i, dest in enumerate(remaining):
+        await asyncio.to_thread(
             lambda d=dest, idx=i: sb.from_("destinations")
                 .update({"visit_order": idx + 1})
                 .eq("id", d["id"])
                 .execute()
         )
-        for i, dest in enumerate(remaining)
-    ])
 
 
 @router.patch("/{trip_id}/destinations/reorder", status_code=200)
