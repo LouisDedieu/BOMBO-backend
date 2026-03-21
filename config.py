@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
 
+    # ── LocationIQ (Geocoding) ────────────────────────────────────────────────
+    LOCATIONIQ_API_KEY: str = ""
+
     @property
     def gemini_api_key_list(self) -> list[str]:
         """Retourne la liste des clés API Gemini disponibles."""
@@ -41,6 +44,5 @@ class Settings(BaseSettings):
         if not keys and self.GEMINI_API_KEY:
             keys = [self.GEMINI_API_KEY]
         return keys
-
 
 settings = Settings()
