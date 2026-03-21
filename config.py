@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # ── LocationIQ (Geocoding) ────────────────────────────────────────────────
     LOCATIONIQ_API_KEY: str = ""
 
+    # ── Cleanup (nettoyage comptes non vérifiés) ──────────────────────────────
+    CLEANUP_SECRET_KEY: str = ""  # Clé secrète pour l'endpoint de cleanup
+
     @property
     def gemini_api_key_list(self) -> list[str]:
         """Retourne la liste des clés API Gemini disponibles."""

@@ -1,0 +1,54 @@
+name: Cleanup Unverified Users
+
+on:
+  schedule:
+    # Tous les jours à 3h du matin UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Supprimer les comptes non vérifiés de plus de X jours'
+        required: false
+        default: '7'
+      dry_run:
+        description: 'Mode simulation (true = ne supprime pas)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup unverified accounts
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          CLEANUP_SECRET_KEY: ${{ secrets.CLEANUP_SECRET_KEY }}
+        run: |
+          DAYS="${{ github.event.inputs.days || '7' }}"
+          DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+
+          echo "🧹 Nettoyage des comptes non vérifiés de plus de ${DAYS} jours"
+          echo "Mode dry_run: ${DRY_RUN}"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${API_URL}/cleanup/unverified-users?days=${DAYS}&dry_run=${DRY_RUN}" \
+            -H "Authorization: Bearer ${CLEANUP_SECRET_KEY}" \
+            -H "Content-Type: application/json")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "HTTP Status: ${HTTP_CODE}"
+          echo "Response: ${BODY}"
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ Erreur lors du nettoyage"
+            exit 1
+          fi
+
+          DELETED=$(echo "$BODY" | jq -r '.users_deleted // 0')
+          echo "✅ ${DELETED} compte(s) supprimé(s)"

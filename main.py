@@ -15,7 +15,7 @@ from config import settings
 from services.ml_service import ml_service
 from services.supabase_service import SupabaseService
 from services.job_processor import JobProcessor
-from api import analyze, trips, inbox, profile, review, cities, city_review, notifications, geocoding
+from api import analyze, trips, inbox, profile, review, cities, city_review, notifications, geocoding, cleanup
 from models.errors import ErrorCode, ErrorResponse, get_error_message
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -153,6 +153,7 @@ app.include_router(cities.router)
 app.include_router(city_review.router)
 app.include_router(notifications.router)
 app.include_router(geocoding.router)
+app.include_router(cleanup.router)
 
 
 # ── Point d'entrée ────────────────────────────────────────────────────────────
