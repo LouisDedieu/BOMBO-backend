@@ -920,3 +920,174 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Erreur clonage city {source_city_id}: {e}")
             return None
+
+    # =========================================================================
+    # MANUAL CREATION
+    # =========================================================================
+
+    async def create_manual_trip(
+        self, user_id: str, title: Optional[str] = None, use_template: bool = True
+    ) -> Optional[str]:
+        """
+        Crée un trip manuellement.
+        Si use_template=True, utilise le template pré-rempli.
+        Si use_template=False, crée un trip vide.
+        Ne sauvegarde PAS automatiquement - l'utilisateur doit sauvegarder depuis l'écran review.
+        Retourne l'ID du trip créé.
+        """
+        if not self.is_configured():
+            return None
+
+        from templates.manual_creation import TRIP_TEMPLATE
+
+        def _do_create() -> Optional[str]:
+            import httpx as _httpx
+
+            def _sb_insert(table: str, payload: dict) -> dict:
+                r = _httpx.post(
+                    self._get_url(table),
+                    json=payload,
+                    headers=self._get_headers(),
+                    timeout=10,
+                )
+                if not r.is_success:
+                    logger.error("❌ %s → %s | body: %s", table, r.status_code, r.text)
+                r.raise_for_status()
+                rows = r.json()
+                return rows[0] if rows else {}
+
+            # 1. Trip principal (sans job_id, source_url, content_creator)
+            trip_insert = {
+                "job_id": None,
+                "user_id": user_id,
+                "trip_title": title or (TRIP_TEMPLATE.get("trip_title") if use_template else "Mon nouveau voyage"),
+                "vibe": TRIP_TEMPLATE.get("vibe") if use_template else None,
+                "source_url": None,
+                "normalized_source_url": None,
+                "content_creator_handle": None,
+            }
+
+            trip_row = _sb_insert("trips", trip_insert)
+            trip_id = trip_row["id"]
+            logger.info(f"Trip manuel créé dans Supabase: {trip_id}")
+
+            # Si template, créer destinations et itinéraire
+            if use_template:
+                # 2. Destinations
+                city_to_dest_id: dict[str, str] = {}
+                for dest in TRIP_TEMPLATE.get("destinations", []):
+                    dest_row = _sb_insert(
+                        "destinations",
+                        {
+                            "trip_id": trip_id,
+                            "city": dest.get("city"),
+                            "country": dest.get("country"),
+                            "days_spent": dest.get("days_spent"),
+                            "visit_order": dest.get("order", 0),
+                        },
+                    )
+                    if dest_row.get("id") and dest.get("city"):
+                        city_to_dest_id[dest["city"].lower().strip()] = dest_row["id"]
+
+                # 3. Itinéraire
+                for day_data in TRIP_TEMPLATE.get("itinerary", []):
+                    location = day_data.get("location")
+                    destination_id = city_to_dest_id.get(location.lower().strip()) if location else None
+
+                    day_row = _sb_insert(
+                        "itinerary_days",
+                        {
+                            "trip_id": trip_id,
+                            "day_number": day_data.get("day"),
+                            "location": location,
+                            "theme": day_data.get("theme"),
+                            "destination_id": destination_id,
+                            "validated": True,
+                        },
+                    )
+                    day_id = day_row["id"]
+
+                    # Spots
+                    for idx, spot in enumerate(day_data.get("spots", [])):
+                        _sb_insert(
+                            "spots",
+                            {
+                                "itinerary_day_id": day_id,
+                                "name": spot.get("name"),
+                                "spot_type": spot.get("spot_type", "attraction"),
+                                "highlight": spot.get("highlight", False),
+                                "spot_order": idx,
+                            },
+                        )
+
+            # Auto-save: ajouter à user_saved_trips
+            _sb_insert("user_saved_trips", {
+                "user_id": user_id,
+                "trip_id": trip_id,
+            })
+            logger.info(f"Trip manuel {trip_id} créé ✓ (sauvegardé)")
+            return trip_id
+
+        try:
+            return await asyncio.to_thread(_do_create)
+        except Exception as e:
+            logger.error(f"Erreur création trip manuel: {e}")
+            return None
+
+    async def create_manual_city(
+        self, user_id: str, city_name: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Crée une city manuellement vide (sans highlights template).
+        Ne sauvegarde PAS automatiquement - l'utilisateur doit sauvegarder depuis l'écran review.
+        Retourne l'ID de la city créée.
+        """
+        if not self.is_configured():
+            return None
+
+        def _do_create() -> Optional[str]:
+            import httpx as _httpx
+
+            def _sb_insert(table: str, payload: dict) -> dict:
+                r = _httpx.post(
+                    self._get_url(table),
+                    json=payload,
+                    headers=self._get_headers(),
+                    timeout=10,
+                )
+                if not r.is_success:
+                    logger.error("❌ %s → %s | body: %s", table, r.status_code, r.text)
+                r.raise_for_status()
+                rows = r.json()
+                return rows[0] if rows else {}
+
+            # City principal (sans job_id, source_url, content_creator)
+            city_insert = {
+                "job_id": None,
+                "user_id": user_id,
+                "city_title": f"Mon guide de {city_name}" if city_name else "Mon nouveau guide",
+                "city_name": city_name or "",
+                "country": "",
+                "vibe_tags": [],
+                "source_url": None,
+                "normalized_source_url": None,
+                "content_creator_handle": None,
+            }
+
+            city_row = _sb_insert("cities", city_insert)
+            city_id = city_row["id"]
+            logger.info(f"City manuelle créée dans Supabase: {city_id}")
+
+            # Auto-save: ajouter à user_saved_cities
+            _sb_insert("user_saved_cities", {
+                "user_id": user_id,
+                "city_id": city_id,
+            })
+            logger.info(f"City manuelle {city_id} créée ✓ (sauvegardée)")
+            return city_id
+
+        try:
+            return await asyncio.to_thread(_do_create)
+        except Exception as e:
+            logger.error(f"Erreur création city manuelle: {e}")
+            return None

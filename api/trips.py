@@ -40,7 +40,34 @@ class SaveTripBody(BaseModel):
     notes: Optional[str] = None
 
 
+class CreateManualTripBody(BaseModel):
+    title: Optional[str] = None
+    use_template: bool = True
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.post("/create-manual", status_code=201)
+async def create_manual_trip(
+    body: CreateManualTripBody = CreateManualTripBody(),
+    user_id: str = Depends(get_current_user_id),
+) -> Dict:
+    """
+    Crée un trip manuellement.
+    Si use_template=True, utilise le template pré-rempli (Paris 2 jours).
+    Si use_template=False, crée un trip vide.
+    Le trip n'est PAS auto-sauvegardé - l'utilisateur doit le sauvegarder depuis l'écran review.
+    """
+    _require_supabase()
+    trip_id = await _supabase_service.create_manual_trip(user_id, body.title, body.use_template)
+    if not trip_id:
+        raise HTTPException(500, detail={
+            "error_code": ErrorCode.EXTERNAL_SERVICE_ERROR,
+            "message": "Impossible de créer le trip",
+        })
+    return {"trip_id": trip_id, "message": "Trip créé"}
+
+
 
 @router.get("/public")
 async def get_public_trips(limit: int = 20) -> List[Dict]:

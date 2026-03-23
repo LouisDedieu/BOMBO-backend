@@ -43,7 +43,28 @@ class MergeCityBody(BaseModel):
     delete_source: bool = True  # Delete source city after merge
 
 
+class CreateManualCityBody(BaseModel):
+    city_name: Optional[str] = None
+
+
 # -- Routes --------------------------------------------------------------------
+
+@router.post("/create-manual", status_code=201)
+async def create_manual_city(
+    body: CreateManualCityBody = CreateManualCityBody(),
+    user_id: str = Depends(get_current_user_id),
+) -> Dict:
+    """Crée une city manuellement avec un template pré-rempli."""
+    _require_supabase()
+    city_id = await _supabase_service.create_manual_city(user_id, body.city_name)
+    if not city_id:
+        raise HTTPException(500, detail={
+            "error_code": ErrorCode.EXTERNAL_SERVICE_ERROR,
+            "message": "Impossible de créer la city",
+        })
+    return {"city_id": city_id, "message": "City créée"}
+
+
 
 @router.get("/public")
 async def get_public_cities(limit: int = 20) -> List[Dict]:
