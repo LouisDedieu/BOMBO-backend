@@ -308,7 +308,7 @@ class MLService:
     def run_inference_from_images(self, image_paths: list[str], **kwargs) -> Tuple[Dict, float]:
         """
         Analyse une séquence d'images (carrousel) via Gemini.
-        Upload chaque image et génère une analyse combinée.
+        Avec retry sur les erreurs serveur (500, 503).
         """
         if not self.is_ready():
             raise RuntimeError("Le client Gemini n'est pas initialisé.")
@@ -320,70 +320,90 @@ class MLService:
         from services.gemini_key_pool import AllKeysExhaustedError
 
         t0 = time.time()
-        uploaded_files: list = []
-        client = None
         last_error = None
+        max_retries = 3
+        retry_delay = 5
 
-        for attempt in range(self._key_pool.total_keys):
-            client, key_idx = self._key_pool.get_client()
+        for retry in range(max_retries):
+            uploaded_files: list = []
+            client = None
 
-            try:
-                # Upload toutes les images
-                for img_path in image_paths:
-                    uploaded_file = self._upload_image(client, img_path)
-                    uploaded_files.append(uploaded_file)
+            for key_attempt in range(self._key_pool.total_keys):
+                client, key_idx = self._key_pool.get_client()
 
-                # Construire le contenu avec toutes les images
-                contents = uploaded_files + [TRAVEL_PROMPT]
+                try:
+                    logger.info("[carousel] Upload de %d images (tentative %d, clé #%d)",
+                                len(image_paths), retry + 1, key_idx + 1)
 
-                # Génération
-                t_gen = time.time()
-                response = client.models.generate_content(
-                    model=self._model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                    ),
-                )
-                duration = round(time.time() - t_gen, 2)
-                logger.info("Génération terminée en %.2fs", duration)
+                    for img_path in image_paths:
+                        uploaded_file = self._upload_image(client, img_path)
+                        uploaded_files.append(uploaded_file)
+                        time.sleep(0.5)
 
-                # Parse
-                raw_text = response.text or ""
-                result = self._parse_json(raw_text)
+                    contents = uploaded_files + [TRAVEL_PROMPT]
 
-                # Cleanup
-                for f in uploaded_files:
-                    self._cleanup_file(client, f)
-
-                total_duration = round(time.time() - t0, 2)
-                return result, total_duration
-
-            except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or ("resource" in error_str and "exhausted" in error_str):
-                    logger.warning(
-                        "Clé #%d : quota atteint (tentative %d/%d)",
-                        key_idx + 1, attempt + 1, self._key_pool.total_keys,
+                    logger.info("[carousel] Lancement de l'analyse Gemini...")
+                    t_gen = time.time()
+                    response = client.models.generate_content(
+                        model=self._model_id,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.1,
+                        ),
                     )
-                    self._key_pool.mark_exhausted(key_idx)
+                    duration = round(time.time() - t_gen, 2)
+                    logger.info("[carousel] Génération terminée en %.2fs", duration)
+
+                    raw_text = response.text or ""
+                    result = self._parse_json(raw_text)
+
                     for f in uploaded_files:
                         self._cleanup_file(client, f)
-                    uploaded_files = []
-                    last_error = e
-                else:
-                    for f in uploaded_files:
-                        self._cleanup_file(client, f)
-                    raise
+
+                    total_duration = round(time.time() - t0, 2)
+                    return result, total_duration
+
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_quota = "429" in error_str or ("resource" in error_str and "exhausted" in error_str)
+                    is_server_error = any(code in error_str for code in ["500", "503", "internal", "server error"])
+
+                    if is_quota:
+                        logger.warning("[carousel] Clé #%d : quota atteint", key_idx + 1)
+                        self._key_pool.mark_exhausted(key_idx)
+                        for f in uploaded_files:
+                            self._cleanup_file(client, f)
+                        uploaded_files = []
+                        last_error = e
+                    elif is_server_error:
+                        logger.warning("[carousel] Erreur serveur Gemini (%s) - retry %d/%d",
+                                       str(e), retry + 1, max_retries)
+                        for f in uploaded_files:
+                            self._cleanup_file(client, f)
+                        last_error = e
+                        break
+                    else:
+                        for f in uploaded_files:
+                            self._cleanup_file(client, f)
+                        raise
+
+            if last_error and "500" not in str(last_error).lower():
+                break
+
+            if retry < max_retries - 1:
+                logger.info("[carousel] Pause de %ds avant retry...", retry_delay)
+                time.sleep(retry_delay)
 
         raise AllKeysExhaustedError(
-            f"Toutes les {self._key_pool.total_keys} clé(s) épuisées. Dernière erreur : {last_error}"
+            f"Toutes les tentatives épuisées après {max_retries} retries. "
+            f"Dernière erreur : {last_error}"
         )
 
     def run_city_inference_from_images(self, image_paths: list[str], **kwargs) -> Tuple[Dict, float]:
         """
         Analyse une séquence d'images (carrousel) comme city guide.
+        Avec retry sur les erreurs serveur (500, 503).
         """
         if not self.is_ready():
             raise RuntimeError("Le client Gemini n'est pas initialisé.")
@@ -395,65 +415,84 @@ class MLService:
         from services.gemini_key_pool import AllKeysExhaustedError
 
         t0 = time.time()
-        uploaded_files: list = []
-        client = None
         last_error = None
+        max_retries = 3
+        retry_delay = 5
 
-        for attempt in range(self._key_pool.total_keys):
-            client, key_idx = self._key_pool.get_client()
+        for retry in range(max_retries):
+            uploaded_files: list = []
+            client = None
 
-            try:
-                # Upload toutes les images
-                for img_path in image_paths:
-                    uploaded_file = self._upload_image(client, img_path)
-                    uploaded_files.append(uploaded_file)
+            for key_attempt in range(self._key_pool.total_keys):
+                client, key_idx = self._key_pool.get_client()
 
-                # Construire le contenu avec toutes les images
-                contents = uploaded_files + [CITY_EXTRACTION_PROMPT]
+                try:
+                    logger.info("[carousel] Upload de %d images (tentative %d, clé #%d)",
+                                len(image_paths), retry + 1, key_idx + 1)
 
-                # Génération
-                t_gen = time.time()
-                response = client.models.generate_content(
-                    model=self._model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                    ),
-                )
-                duration = round(time.time() - t_gen, 2)
-                logger.info("Génération terminée en %.2fs", duration)
+                    for img_path in image_paths:
+                        uploaded_file = self._upload_image(client, img_path)
+                        uploaded_files.append(uploaded_file)
+                        time.sleep(0.5)
 
-                # Parse
-                raw_text = response.text or ""
-                result = self._parse_json_generic(raw_text, get_city_fallback_result())
+                    contents = uploaded_files + [CITY_EXTRACTION_PROMPT]
 
-                # Cleanup
-                for f in uploaded_files:
-                    self._cleanup_file(client, f)
-
-                total_duration = round(time.time() - t0, 2)
-                return result, total_duration
-
-            except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or ("resource" in error_str and "exhausted" in error_str):
-                    logger.warning(
-                        "Clé #%d : quota atteint (tentative %d/%d)",
-                        key_idx + 1, attempt + 1, self._key_pool.total_keys,
+                    logger.info("[carousel] Lancement de l'analyse Gemini...")
+                    t_gen = time.time()
+                    response = client.models.generate_content(
+                        model=self._model_id,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.1,
+                        ),
                     )
-                    self._key_pool.mark_exhausted(key_idx)
+                    duration = round(time.time() - t_gen, 2)
+                    logger.info("[carousel] Génération terminée en %.2fs", duration)
+
+                    raw_text = response.text or ""
+                    result = self._parse_json_generic(raw_text, get_city_fallback_result())
+
                     for f in uploaded_files:
                         self._cleanup_file(client, f)
-                    uploaded_files = []
-                    last_error = e
-                else:
-                    for f in uploaded_files:
-                        self._cleanup_file(client, f)
-                    raise
+
+                    total_duration = round(time.time() - t0, 2)
+                    return result, total_duration
+
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_quota = "429" in error_str or ("resource" in error_str and "exhausted" in error_str)
+                    is_server_error = any(code in error_str for code in ["500", "503", "internal", "server error"])
+
+                    if is_quota:
+                        logger.warning("[carousel] Clé #%d : quota atteint", key_idx + 1)
+                        self._key_pool.mark_exhausted(key_idx)
+                        for f in uploaded_files:
+                            self._cleanup_file(client, f)
+                        uploaded_files = []
+                        last_error = e
+                    elif is_server_error:
+                        logger.warning("[carousel] Erreur serveur Gemini (%s) - retry %d/%d",
+                                       str(e), retry + 1, max_retries)
+                        for f in uploaded_files:
+                            self._cleanup_file(client, f)
+                        last_error = e
+                        break
+                    else:
+                        for f in uploaded_files:
+                            self._cleanup_file(client, f)
+                        raise
+
+            if last_error and "500" not in str(last_error).lower():
+                break
+
+            if retry < max_retries - 1:
+                logger.info("[carousel] Pause de %ds avant retry...", retry_delay)
+                time.sleep(retry_delay)
 
         raise AllKeysExhaustedError(
-            f"Toutes les {self._key_pool.total_keys} clé(s) épuisées. Dernière erreur : {last_error}"
+            f"Toutes les tentatives épuisées après {max_retries} retries. "
+            f"Dernière erreur : {last_error}"
         )
 
     def _upload_image(self, client, image_path: str):

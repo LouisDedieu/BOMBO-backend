@@ -293,14 +293,19 @@ def _download_carousel_instaloader(url: str, output_dir: str) -> tuple[list[str]
         
         post = instaloader.Post.from_shortcode(L.context, shortcode)
         
-        if not post.is_carousel:
-            logger.info("Le post n'est pas un carrousel")
+        sidecar_nodes = list(post.get_sidecar_nodes())
+        
+        if not sidecar_nodes:
+            logger.info("Le post n'est pas un carrousel (pas de sidecar nodes)")
             return [], 0
         
-        logger.info(f"Téléchargement du carrousel {shortcode} ({len(post.get_sidecar_nodes())} images)")
+        logger.info(f"Téléchargement du carrousel {shortcode} ({len(sidecar_nodes)} images)")
         
-        for idx, node in enumerate(post.get_sidecar_nodes()):
-            image_url = node.url
+        for idx, node in enumerate(sidecar_nodes):
+            image_url = getattr(node, 'display_url', None) or getattr(node, 'video_url', None)
+            if not image_url:
+                logger.warning(f"Node {idx} n'a pas d'URL, tentative de téléchargement direct")
+                continue
             ext = 'jpg'
             output_path = os.path.join(output_dir, f"image_{idx:03d}.{ext}")
             
@@ -628,8 +633,21 @@ def _download_with_info(
     for i, strategy in enumerate(strategies, start=1):
         logger.info(f"Exécution stratégie {i}/{len(strategies)}: {strategy.label}")
         
+        if i == 1:
+            try:
+                cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--socket-timeout', '30', url]
+                logger.info(f"Test basique sans impersonation...")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                logger.info(f"Test basique returncode: {result.returncode}, stdout len: {len(result.stdout)}, stderr len: {len(result.stderr)}")
+                if result.stdout and '{' in result.stdout:
+                    info = json.loads(result.stdout.strip().split('\n')[-1])
+                    logger.info(f"JSON trouvé avec test basique!")
+                    return info, True
+            except Exception as e:
+                logger.warning(f"Test basique échoué: {e}")
+        
         try:
-            cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--no-warnings', 
+            cmd = ['yt-dlp', '--dump-json', '--no-playlist', 
                    '--socket-timeout', '30']
             
             if strategy.impersonate:
@@ -655,6 +673,8 @@ def _download_with_info(
             logger.info(f"Stratégie {i} returncode: {result.returncode}")
             
             combined = (result.stdout or '') + '\n' + (result.stderr or '')
+            
+            logger.info(f"Stratégie {i} stdout len: {len(result.stdout or '')}, stderr len: {len(result.stderr or '')}")
             
             if result.returncode == 0 and combined:
                 lines = combined.strip().split('\n')
@@ -692,105 +712,54 @@ async def download_content(
     """
     Télécharge une vidéo ou un carrousel d'images.
     Retourne un DownloadResult avec le type détecté et les chemins de fichiers.
-    
-    Args:
-        url          : URL publique TikTok ou Instagram
-        output_dir   : répertoire où sauvegarder les fichiers
-        cookies_file : chemin vers un fichier cookies Netscape (optionnel)
-        proxy        : URL proxy SOCKS5/HTTP (optionnel)
-    
-    Returns:
-        DownloadResult avec content_type, file_paths, duration_seconds, image_count
-    
-    Raises:
-        UnsupportedURLError : domaine non autorisé
-        PrivateVideoError   : contenu privé ou lien expiré
-        IPBlockedError      : toutes les stratégies ont échoué
-        DownloadError       : erreur yt-dlp inattendue
     """
     validated_url = validate_url(url)
-    logger.info("Détection du type de contenu → %s", validated_url)
+    logger.info("Téléchargement de %s", validated_url)
     
     loop = asyncio.get_running_loop()
+    video_path = os.path.join(output_dir, "video.mp4")
+    os.makedirs(output_dir, exist_ok=True)
     
-    info, success = await loop.run_in_executor(
-        None, 
-        partial(_download_with_info, validated_url, os.path.join(output_dir, "temp"), cookies_file, proxy)
-    )
+    video_downloaded = False
+    try:
+        await download_video(validated_url, video_path, cookies_file, proxy)
+        video_downloaded = True
+    except DownloadError as e:
+        if "vide ou introuvable" not in str(e).lower():
+            raise
     
-    if not success or not info:
-        raise DownloadError("Impossible d'extraire les métadonnées du contenu.")
-    
-    content_type = _detect_content_type(info)
-    logger.info("Type détecté : %s", content_type.value)
-    
-    if content_type == ContentType.CAROUSEL:
-        os.makedirs(output_dir, exist_ok=True)
-        
-        file_paths, image_count = await loop.run_in_executor(
-            None,
-            partial(_download_carousel_images, info, output_dir)
-        )
-        
-        if not file_paths:
-            logger.info("Aucune image dans métadonnées, tentative via instaloader...")
-            file_paths, image_count = await loop.run_in_executor(
-                None,
-                partial(_download_carousel_instaloader, validated_url, output_dir)
-            )
-        
-        if not file_paths:
-            raise DownloadError(
-                "Impossible de télécharger les images de ce carrousel Instagram. "
-                "L'analyse de carrousels nécessite soit des cookies Instagram, soit instaloader installé."
-            )
-        
-        logger.info(f"Carrousel téléchargé : {image_count} images")
+    if video_downloaded and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+        duration = 0.0
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(video_path, download=False)
+                duration = info.get('duration', 0.0) or 0.0
+        except:
+            pass
         
         return DownloadResult(
-            content_type=content_type,
+            content_type=ContentType.VIDEO,
+            file_paths=[video_path],
+            duration_seconds=duration,
+            image_count=0,
+        )
+    
+    logger.info("Fichier vidéo vide ou inexistant → tentative carrousel via instaloader")
+    
+    file_paths, image_count = await loop.run_in_executor(
+        None,
+        partial(_download_carousel_instaloader, validated_url, output_dir)
+    )
+    
+    if file_paths:
+        return DownloadResult(
+            content_type=ContentType.CAROUSEL,
             file_paths=file_paths,
             duration_seconds=0.0,
             image_count=image_count,
         )
     
-    video_path = os.path.join(output_dir, "video.mp4")
-    
-    try:
-        await download_video(validated_url, video_path, cookies_file, proxy)
-    except DownloadError as e:
-        if "vide ou introuvable" in str(e).lower():
-            logger.warning("Fichier téléchargé vide → vérification carrousel via métadonnées")
-            carousel_indicators = [
-                info.get('media_type') == 8,
-                info.get('num_slides', 0) > 1,
-                info.get('carousel_title') is not None,
-            ]
-            if any(carousel_indicators):
-                logger.info("Fichier vide + indicators carrousel → téléchargement images")
-                os.makedirs(output_dir, exist_ok=True)
-                file_paths, image_count = await loop.run_in_executor(
-                    None,
-                    partial(_download_carousel_images, info, output_dir)
-                )
-                if file_paths:
-                    return DownloadResult(
-                        content_type=ContentType.CAROUSEL,
-                        file_paths=file_paths,
-                        duration_seconds=0.0,
-                        image_count=image_count,
-                    )
-            raise DownloadError(
-                "Le contenu semble être un carrousel d'images. "
-                "Le téléchargement d'images n'a pas pu être effectué."
-            )
-        raise
-    
-    duration = info.get("duration", 0.0) or 0.0
-    
-    return DownloadResult(
-        content_type=ContentType.VIDEO,
-        file_paths=[video_path],
-        duration_seconds=duration,
-        image_count=0,
+    raise DownloadError(
+        "Impossible de télécharger ce contenu. "
+        "Assurez-vous que le lien est public et que instaloader est installé."
     )

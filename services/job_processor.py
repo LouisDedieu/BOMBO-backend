@@ -158,15 +158,18 @@ class JobProcessor:
                 entity_type = entity_type_override
                 logger.info("[job %s] Type forcé par l'utilisateur : %s", job_id, entity_type)
             else:
-                # Auto-détection
-                await job_manager.send_sse_update(
-                    job_id, "analyzing", {"progress": 55, "message": "Détection du type..."}
-                )
-                loop = asyncio.get_event_loop()
-                input_path = file_paths[0] if file_paths else ""
-                entity_type = await loop.run_in_executor(
-                    _executor, ml_service.detect_entity_type, input_path
-                )
+                if content_type == ContentType.CAROUSEL:
+                    entity_type = 'city'
+                    logger.info("[job %s] Carrousel → analyse comme city guide", job_id)
+                else:
+                    await job_manager.send_sse_update(
+                        job_id, "analyzing", {"progress": 55, "message": "Détection du type..."}
+                    )
+                    loop = asyncio.get_event_loop()
+                    input_path = file_paths[0] if file_paths else ""
+                    entity_type = await loop.run_in_executor(
+                        _executor, ml_service.detect_entity_type, input_path
+                    )
 
             # ── Étape 3 : Analyse selon le type ──────────────────────────────
             await job_manager.send_sse_update(job_id, "analyzing", {"progress": 60})
@@ -181,14 +184,9 @@ class JobProcessor:
             try:
                 loop = asyncio.get_event_loop()
                 if content_type == ContentType.CAROUSEL:
-                    if entity_type == 'city':
-                        result, duration = await loop.run_in_executor(
-                            _executor, ml_service.run_city_inference_from_images, file_paths
-                        )
-                    else:
-                        result, duration = await loop.run_in_executor(
-                            _executor, ml_service.run_inference_from_images, file_paths
-                        )
+                    result, duration = await loop.run_in_executor(
+                        _executor, ml_service.run_city_inference_from_images, file_paths
+                    )
                 else:
                     input_path = file_paths[0] if file_paths else ""
                     if entity_type == 'city':
