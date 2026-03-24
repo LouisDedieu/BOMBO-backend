@@ -552,6 +552,12 @@ async def download_content(
             logger.warning("Carrousel détecté mais aucune image téléchargée → fallback vidéo")
             content_type = ContentType.VIDEO
             image_count = 0
+            return DownloadResult(
+                content_type=content_type,
+                file_paths=[],
+                duration_seconds=0.0,
+                image_count=image_count,
+            )
         
         return DownloadResult(
             content_type=content_type,
@@ -562,6 +568,30 @@ async def download_content(
     
     video_path = os.path.join(output_dir, "video.mp4")
     await download_video(validated_url, video_path, cookies_file, proxy)
+    
+    p = Path(video_path)
+    if p.exists() and p.stat().st_size == 0:
+        logger.warning("Fichier téléchargé vide → vérification carrousel via métadonnées")
+        carousel_indicators = [
+            info.get('media_type') == 8,
+            info.get('num_slides', 0) > 1,
+            info.get('carousel_title') is not None,
+        ]
+        if any(carousel_indicators):
+            logger.info("Fichier vide + indicators carrousel → téléchargement images")
+            os.remove(video_path)
+            os.makedirs(output_dir, exist_ok=True)
+            file_paths, image_count = await loop.run_in_executor(
+                None,
+                partial(_download_carousel_images, info, output_dir)
+            )
+            if file_paths:
+                return DownloadResult(
+                    content_type=ContentType.CAROUSEL,
+                    file_paths=file_paths,
+                    duration_seconds=0.0,
+                    image_count=image_count,
+                )
     
     duration = info.get("duration", 0.0) or 0.0
     
