@@ -170,6 +170,8 @@ class SupabaseService:
                 "content_creator_links": trip_data.get("content_creator", {}).get(
                     "links_mentioned", []
                 ),
+                "content_type": trip_data.get("content_type", "video"),
+                "image_count": trip_data.get("image_count", 0),
             }
 
             try:
@@ -584,6 +586,8 @@ class SupabaseService:
                 "normalized_source_url": city_data.get("normalized_source_url"),
                 "content_creator_handle": city_data.get("content_creator", {}).get("handle"),
                 "content_creator_links": city_data.get("content_creator", {}).get("links_mentioned", []),
+                "content_type": city_data.get("content_type", "video"),
+                "image_count": city_data.get("image_count", 0),
             }
 
             try:

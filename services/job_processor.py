@@ -6,6 +6,7 @@ import asyncio
 import logging
 import tempfile
 import json
+import shutil
 from typing import Dict, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +18,8 @@ from services.supabase_service import SupabaseService
 from services.sse_service import job_manager
 from services.notification_service import NotificationService
 from downloader import (
-    download_video,
+    download_content,
+    ContentType,
     UnsupportedURLError,
     PrivateVideoError,
     IPBlockedError,
@@ -50,7 +52,7 @@ class JobProcessor:
         Exécute l'analyse en arrière-plan et envoie des mises à jour SSE.
         Supporte la détection automatique du type (trip/city) ou override manuel.
         """
-        tmp_path: Optional[str] = None
+        tmp_dir: Optional[str] = None
 
         try:
             # Créer le job dans Supabase
@@ -113,17 +115,21 @@ class JobProcessor:
 
             logger.info("[job %s] Téléchargement de %s", job_id, request.url)
 
-            # Générer un chemin unique
-            tmp_path = os.path.join(tempfile.gettempdir(), f"bombo_{job_id}.mp4")
+            # Générer un répertoire unique pour le job
+            tmp_dir = os.path.join(tempfile.gettempdir(), f"bombo_{job_id}")
+            os.makedirs(tmp_dir, exist_ok=True)
 
             try:
-                await download_video(
+                download_result = await download_content(
                     request.url,
-                    tmp_path,
+                    tmp_dir,
                     cookies_file=request.cookies_file or self.default_cookies_file,
                     proxy=request.proxy or self.default_proxy,
                 )
-                output_path = tmp_path
+                content_type = download_result.content_type
+                file_paths = download_result.file_paths
+                duration = download_result.duration_seconds
+                image_count = download_result.image_count
 
             except UnsupportedURLError:
                 error_msg = "URL non supportée (accepte TikTok, Instagram Reels)."
@@ -136,7 +142,11 @@ class JobProcessor:
                 await self._handle_error(job_id, str(exc), request.user_id, request.url)
                 return
 
-            logger.info("[job %s] Vidéo téléchargée : %s", job_id, output_path)
+            if content_type == ContentType.CAROUSEL:
+                logger.info("[job %s] Carrousel détecté : %d images", job_id, image_count)
+            else:
+                logger.info("[job %s] Vidéo téléchargée : %s", job_id, file_paths[0] if file_paths else "?")
+
             await job_manager.send_sse_update(
                 job_id, "downloading", {"progress": 50}
             )
@@ -153,8 +163,9 @@ class JobProcessor:
                     job_id, "analyzing", {"progress": 55, "message": "Détection du type..."}
                 )
                 loop = asyncio.get_event_loop()
+                input_path = file_paths[0] if file_paths else ""
                 entity_type = await loop.run_in_executor(
-                    _executor, ml_service.detect_entity_type, output_path
+                    _executor, ml_service.detect_entity_type, input_path
                 )
 
             # ── Étape 3 : Analyse selon le type ──────────────────────────────
@@ -169,14 +180,25 @@ class JobProcessor:
 
             try:
                 loop = asyncio.get_event_loop()
-                if entity_type == 'city':
-                    result, duration = await loop.run_in_executor(
-                        _executor, ml_service.run_city_inference, output_path
-                    )
+                if content_type == ContentType.CAROUSEL:
+                    if entity_type == 'city':
+                        result, duration = await loop.run_in_executor(
+                            _executor, ml_service.run_city_inference_from_images, file_paths
+                        )
+                    else:
+                        result, duration = await loop.run_in_executor(
+                            _executor, ml_service.run_inference_from_images, file_paths
+                        )
                 else:
-                    result, duration = await loop.run_in_executor(
-                        _executor, ml_service.run_inference, output_path
-                    )
+                    input_path = file_paths[0] if file_paths else ""
+                    if entity_type == 'city':
+                        result, duration = await loop.run_in_executor(
+                            _executor, ml_service.run_city_inference, input_path
+                        )
+                    else:
+                        result, duration = await loop.run_in_executor(
+                            _executor, ml_service.run_inference, input_path
+                        )
                 await job_manager.send_sse_update(
                     job_id, "analyzing", {"progress": 75}
                 )
@@ -205,10 +227,12 @@ class JobProcessor:
                 await job_manager.send_sse_update(
                     job_id, "analyzing", {"progress": 90, "message": "Sauvegarde..."}
                 )
-                # Ajouter l'URL source au résultat avant de sauvegarder
+                # Ajouter l'URL source et type de contenu au résultat avant de sauvegarder
                 result["source_url"] = request.url
                 if normalized_url:
                     result["normalized_source_url"] = normalized_url
+                result["content_type"] = content_type.value
+                result["image_count"] = image_count
 
                 if entity_type == 'city':
                     city_id = await self.supabase.create_city(
@@ -225,6 +249,8 @@ class JobProcessor:
                 "trip_id": trip_id,
                 "city_id": city_id,
                 "entity_type": entity_type,
+                "content_type": content_type.value,
+                "image_count": image_count,
                 "duration_seconds": duration,
                 "raw_json": result,
                 "source_url": request.url,
@@ -241,6 +267,8 @@ class JobProcessor:
                     "completed_at": datetime.utcnow().isoformat(),
                     "duration_seconds": duration,
                     "entity_type": entity_type,
+                    "content_type": content_type.value,
+                    "image_count": image_count,
                 }
                 if city_id:
                     update_data["city_id"] = city_id
@@ -270,16 +298,16 @@ class JobProcessor:
             await self._handle_error(job_id, error_msg, request.user_id, request.url)
 
         finally:
-            # Supprimer le fichier temporaire
-            if tmp_path and os.path.exists(tmp_path):
+            # Supprimer le répertoire temporaire
+            if tmp_dir and os.path.exists(tmp_dir):
                 try:
-                    os.unlink(tmp_path)
+                    shutil.rmtree(tmp_dir)
                     logger.debug(
-                        "[job %s] Fichier temporaire supprimé : %s", job_id, tmp_path
+                        "[job %s] Répertoire temporaire supprimé : %s", job_id, tmp_dir
                     )
                 except OSError as e:
                     logger.warning(
-                        "[job %s] Impossible de supprimer le fichier temp : %s",
+                        "[job %s] Impossible de supprimer le répertoire temp : %s",
                         job_id,
                         e,
                     )

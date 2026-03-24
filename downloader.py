@@ -1,41 +1,59 @@
 """
 downloader.py — Téléchargement de vidéos TikTok / Instagram via yt-dlp
-Étape 2 du projet BOMBO
+ Étape 2 du projet BOMBO
 
-Responsabilités :
-  - Valider l'URL (TikTok / Instagram uniquement)
-  - Télécharger la vidéo dans un dossier temporaire géré par l'appelant
-  - Contourner le blocage TikTok par cascade de stratégies
-  - Exposer des exceptions claires pour que main.py renvoie les bons codes HTTP
+ Responsabilités :
+   - Valider l'URL (TikTok / Instagram uniquement)
+   - Télécharger la vidéo dans un dossier temporaire géré par l'appelant
+   - Détecter et télécharger les carrousels Instagram/TikTok
+   - Contourner le blocage TikTok par cascade de stratégies
+   - Exposer des exceptions claires pour que main.py renvoie les bons codes HTTP
 
-Stratégie anti-blocage (cascade automatique) :
-  Le blocage TikTok est double :
-    (a) Empreinte TLS Python détectée  → résolu par curl_cffi (impersonation navigateur)
-    (b) Absence de session TikTok      → résolu par cookies du navigateur installé
+ Stratégie anti-blocage (cascade automatique) :
+   Le blocage TikTok est double :
+     (a) Empreinte TLS Python détectée  → résolu par curl_cffi (impersonation navigateur)
+     (b) Absence de session TikTok      → résolu par cookies du navigateur installé
 
-  Ordre des tentatives :
-    1. Chrome  (cookies) + impersonate Chrome 124
-    2. Safari  (cookies) + impersonate Safari
-    3. Firefox (cookies) + impersonate Chrome 124
-    4. Proxy   + impersonate Chrome 124          (si PROXY_URL configuré)
-    5. Fichier cookies manuel                    (si cookies_file fourni)
-    6. Impersonation seule, sans cookies         (dernier recours)
+   Ordre des tentatives :
+     1. Chrome  (cookies) + impersonate Chrome 124
+     2. Safari  (cookies) + impersonate Safari
+     3. Firefox (cookies) + impersonate Chrome 124
+     4. Proxy   + impersonate Chrome 124          (si PROXY_URL configuré)
+     5. Fichier cookies manuel                    (si cookies_file fourni)
+     6. Impersonation seule, sans cookies         (dernier recours)
 
-  curl_cffi requis pour les impersonations : pip install curl_cffi
+   curl_cffi requis pour les impersonations : pip install curl_cffi
 """
 
 import re
+import os
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from functools import partial
 from typing import Any
+from enum import Enum
 
 import yt_dlp
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
 logger = logging.getLogger("bombo.downloader")
+
+
+class ContentType(str, Enum):
+    VIDEO = "video"
+    CAROUSEL = "carousel"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class DownloadResult:
+    content_type: ContentType = ContentType.VIDEO
+    file_paths: list[str] = field(default_factory=list)
+    duration_seconds: float = 0.0
+    image_count: int = 0
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -52,6 +70,69 @@ URL_RE = re.compile(r"https?://(?P<domain>[^/\s]+)", re.IGNORECASE)
 
 DOWNLOAD_TIMEOUT = 120  # secondes
 MAX_VIDEO_DURATION = 300  # 5 minutes en secondes
+MAX_CAROUSEL_IMAGES = 20  # Limite pour éviter les carrousels trop longs
+
+
+def _detect_content_type(info: dict) -> ContentType:
+    """
+    Détecte si le contenu est une vidéo ou un carrousel d'images.
+    
+    Instagram carrousels : 'entries' existe avec plusieurs images
+    TikTok carrousels : '_type' == 'playlist' avec images
+    """
+    if 'entries' in info and info['entries']:
+        entries = info['entries']
+        if len(entries) > 1:
+            image_extensions = {'jpg', 'jpeg', 'png', 'webp'}
+            all_images = all(
+                e.get('ext', '').lower() in image_extensions 
+                for e in entries if e
+            )
+            if all_images:
+                return ContentType.CAROUSEL
+    return ContentType.VIDEO
+
+
+def _download_carousel_images(
+    info: dict,
+    output_dir: str,
+    max_images: int = MAX_CAROUSEL_IMAGES
+) -> tuple[list[str], int]:
+    """
+    Télécharge les images d'un carrousel Instagram/TikTok.
+    Retourne (file_paths, image_count).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    file_paths: list[str] = []
+    
+    entries = info.get('entries', [])
+    for idx, entry in enumerate(entries[:max_images]):
+        if not entry:
+            continue
+        
+        ext = entry.get('ext', 'jpg').lower()
+        if ext not in {'jpg', 'jpeg', 'png', 'webp'}:
+            continue
+            
+        output_path = os.path.join(output_dir, f"image_{idx:03d}.{ext}")
+        
+        if entry.get('filepath') and os.path.exists(entry['filepath']):
+            shutil.copy(entry['filepath'], output_path)
+        elif entry.get('url'):
+            import httpx
+            try:
+                response = httpx.get(entry['url'], timeout=30)
+                response.raise_for_status()
+                with open(output_path, 'wb') as f:
+                    f.write(response.content)
+            except Exception as e:
+                logger.warning(f"Échec téléchargement image {idx}: {e}")
+                continue
+        
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            file_paths.append(output_path)
+    
+    return file_paths, len(file_paths)
 
 # Cibles d'impersonation curl_cffi
 _CHROME = ImpersonateTarget("chrome", "124")
@@ -373,3 +454,105 @@ async def download_video(
         raise DownloadError("Fichier téléchargé vide ou introuvable.")
 
     logger.info("Fichier prêt (%d octets) → %s", p.stat().st_size, output_path)
+
+
+def _download_with_info(
+    url: str,
+    output_path: str,
+    cookies_file: str | None,
+    proxy: str | None,
+) -> tuple[dict, bool]:
+    """
+    Télécharge et retourne les métadonnées yt-dlp pour détection de carrousel.
+    Retourne (info_dict, success).
+    """
+    has_curl = _curl_cffi_available()
+    strategies = _build_strategies(cookies_file, proxy, has_curl)
+    
+    for i, strategy in enumerate(strategies, start=1):
+        opts = strategy.build_ydl_opts(output_path)
+        opts['skip_download'] = True
+        
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    return info, True
+        except Exception as e:
+            logger.debug("Tentative %d échouée pour info extraction: %s", i, e)
+            continue
+    
+    return {}, False
+
+
+async def download_content(
+    url: str,
+    output_dir: str,
+    cookies_file: str | None = None,
+    proxy: str | None = None,
+) -> DownloadResult:
+    """
+    Télécharge une vidéo ou un carrousel d'images.
+    Retourne un DownloadResult avec le type détecté et les chemins de fichiers.
+    
+    Args:
+        url          : URL publique TikTok ou Instagram
+        output_dir   : répertoire où sauvegarder les fichiers
+        cookies_file : chemin vers un fichier cookies Netscape (optionnel)
+        proxy        : URL proxy SOCKS5/HTTP (optionnel)
+    
+    Returns:
+        DownloadResult avec content_type, file_paths, duration_seconds, image_count
+    
+    Raises:
+        UnsupportedURLError : domaine non autorisé
+        PrivateVideoError   : contenu privé ou lien expiré
+        IPBlockedError      : toutes les stratégies ont échoué
+        DownloadError       : erreur yt-dlp inattendue
+    """
+    validated_url = validate_url(url)
+    logger.info("Détection du type de contenu → %s", validated_url)
+    
+    loop = asyncio.get_running_loop()
+    
+    info, success = await loop.run_in_executor(
+        None, 
+        partial(_download_with_info, validated_url, os.path.join(output_dir, "temp"), cookies_file, proxy)
+    )
+    
+    if not success or not info:
+        raise DownloadError("Impossible d'extraire les métadonnées du contenu.")
+    
+    content_type = _detect_content_type(info)
+    logger.info("Type détecté : %s", content_type.value)
+    
+    if content_type == ContentType.CAROUSEL:
+        os.makedirs(output_dir, exist_ok=True)
+        file_paths, image_count = await loop.run_in_executor(
+            None,
+            partial(_download_carousel_images, info, output_dir)
+        )
+        
+        if not file_paths:
+            logger.warning("Carrousel détecté mais aucune image téléchargée → fallback vidéo")
+            content_type = ContentType.VIDEO
+            image_count = 0
+        
+        return DownloadResult(
+            content_type=content_type,
+            file_paths=file_paths,
+            duration_seconds=0.0,
+            image_count=image_count,
+        )
+    
+    video_path = os.path.join(output_dir, "video.mp4")
+    await download_video(validated_url, video_path, cookies_file, proxy)
+    
+    duration = info.get("duration", 0.0) or 0.0
+    
+    return DownloadResult(
+        content_type=ContentType.VIDEO,
+        file_paths=[video_path],
+        duration_seconds=duration,
+        image_count=0,
+    )

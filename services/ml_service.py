@@ -305,6 +305,184 @@ class MLService:
             get_city_fallback_result(),
         )
 
+    def run_inference_from_images(self, image_paths: list[str], **kwargs) -> Tuple[Dict, float]:
+        """
+        Analyse une séquence d'images (carrousel) via Gemini.
+        Upload chaque image et génère une analyse combinée.
+        """
+        if not self.is_ready():
+            raise RuntimeError("Le client Gemini n'est pas initialisé.")
+
+        if not image_paths:
+            raise ValueError("Aucune image à analyser.")
+
+        from google.genai import types
+        from services.gemini_key_pool import AllKeysExhaustedError
+
+        t0 = time.time()
+        uploaded_files: list = []
+        client = None
+        last_error = None
+
+        for attempt in range(self._key_pool.total_keys):
+            client, key_idx = self._key_pool.get_client()
+
+            try:
+                # Upload toutes les images
+                for img_path in image_paths:
+                    uploaded_file = self._upload_image(client, img_path)
+                    uploaded_files.append(uploaded_file)
+
+                # Construire le contenu avec toutes les images
+                contents = uploaded_files + [TRAVEL_PROMPT]
+
+                # Génération
+                t_gen = time.time()
+                response = client.models.generate_content(
+                    model=self._model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
+                )
+                duration = round(time.time() - t_gen, 2)
+                logger.info("Génération terminée en %.2fs", duration)
+
+                # Parse
+                raw_text = response.text or ""
+                result = self._parse_json(raw_text)
+
+                # Cleanup
+                for f in uploaded_files:
+                    self._cleanup_file(client, f)
+
+                total_duration = round(time.time() - t0, 2)
+                return result, total_duration
+
+            except Exception as e:
+                error_str = str(e).lower()
+                if "429" in error_str or ("resource" in error_str and "exhausted" in error_str):
+                    logger.warning(
+                        "Clé #%d : quota atteint (tentative %d/%d)",
+                        key_idx + 1, attempt + 1, self._key_pool.total_keys,
+                    )
+                    self._key_pool.mark_exhausted(key_idx)
+                    for f in uploaded_files:
+                        self._cleanup_file(client, f)
+                    uploaded_files = []
+                    last_error = e
+                else:
+                    for f in uploaded_files:
+                        self._cleanup_file(client, f)
+                    raise
+
+        raise AllKeysExhaustedError(
+            f"Toutes les {self._key_pool.total_keys} clé(s) épuisées. Dernière erreur : {last_error}"
+        )
+
+    def run_city_inference_from_images(self, image_paths: list[str], **kwargs) -> Tuple[Dict, float]:
+        """
+        Analyse une séquence d'images (carrousel) comme city guide.
+        """
+        if not self.is_ready():
+            raise RuntimeError("Le client Gemini n'est pas initialisé.")
+
+        if not image_paths:
+            raise ValueError("Aucune image à analyser.")
+
+        from google.genai import types
+        from services.gemini_key_pool import AllKeysExhaustedError
+
+        t0 = time.time()
+        uploaded_files: list = []
+        client = None
+        last_error = None
+
+        for attempt in range(self._key_pool.total_keys):
+            client, key_idx = self._key_pool.get_client()
+
+            try:
+                # Upload toutes les images
+                for img_path in image_paths:
+                    uploaded_file = self._upload_image(client, img_path)
+                    uploaded_files.append(uploaded_file)
+
+                # Construire le contenu avec toutes les images
+                contents = uploaded_files + [CITY_EXTRACTION_PROMPT]
+
+                # Génération
+                t_gen = time.time()
+                response = client.models.generate_content(
+                    model=self._model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
+                )
+                duration = round(time.time() - t_gen, 2)
+                logger.info("Génération terminée en %.2fs", duration)
+
+                # Parse
+                raw_text = response.text or ""
+                result = self._parse_json_generic(raw_text, get_city_fallback_result())
+
+                # Cleanup
+                for f in uploaded_files:
+                    self._cleanup_file(client, f)
+
+                total_duration = round(time.time() - t0, 2)
+                return result, total_duration
+
+            except Exception as e:
+                error_str = str(e).lower()
+                if "429" in error_str or ("resource" in error_str and "exhausted" in error_str):
+                    logger.warning(
+                        "Clé #%d : quota atteint (tentative %d/%d)",
+                        key_idx + 1, attempt + 1, self._key_pool.total_keys,
+                    )
+                    self._key_pool.mark_exhausted(key_idx)
+                    for f in uploaded_files:
+                        self._cleanup_file(client, f)
+                    uploaded_files = []
+                    last_error = e
+                else:
+                    for f in uploaded_files:
+                        self._cleanup_file(client, f)
+                    raise
+
+        raise AllKeysExhaustedError(
+            f"Toutes les {self._key_pool.total_keys} clé(s) épuisées. Dernière erreur : {last_error}"
+        )
+
+    def _upload_image(self, client, image_path: str):
+        """Upload une image vers Gemini File API et attend qu'elle soit ACTIVE."""
+        import mimetypes
+
+        mime_type = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+        logger.info("Upload de l'image vers Gemini File API : %s", image_path)
+
+        uploaded_file = client.files.upload(
+            file=image_path,
+            config=types.UploadFileConfig(mime_type=mime_type),
+        )
+        logger.info("Fichier uploadé : %s (state=%s)", uploaded_file.name, uploaded_file.state)
+
+        # Attendre ACTIVE
+        max_wait = 60
+        waited = 0
+        while str(uploaded_file.state) not in ("FileState.ACTIVE", "ACTIVE"):
+            if waited >= max_wait:
+                raise RuntimeError("Timeout : le fichier Gemini n'est pas devenu ACTIVE.")
+            time.sleep(1)
+            waited += 1
+            uploaded_file = client.files.get(name=uploaded_file.name)
+            logger.debug("File state: %s (attendu depuis %ds)", uploaded_file.state, waited)
+
+        logger.info("Image ACTIVE après %ds — prête pour l'analyse.", waited)
+        return uploaded_file
+
     @staticmethod
     def _cleanup_file(client, uploaded_file):
         """Supprime un fichier uploadé sur Gemini."""
