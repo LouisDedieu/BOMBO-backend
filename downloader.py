@@ -769,20 +769,20 @@ def _build_strategies(
 # ── Validation ────────────────────────────────────────────────────────────────
 
 def validate_url(url: str) -> str:
+    """
+    Valide l'URL. Accepte TikTok, Instagram, ou tout autre site (traité comme blog).
+    """
     url = url.strip()
     m = URL_RE.match(url)
     if not m:
         raise UnsupportedURLError(f"URL malformée : {url!r}")
     domain = m.group("domain").lower()
     
-    # Accept TikTok, Instagram, or blog URLs
-    if domain not in SUPPORTED_DOMAINS and domain not in BLOG_DOMAINS:
-        # Check if it's a blog path
-        if not BLOG_PATH_RE.search(url):
-            raise UnsupportedURLError(
-                f"Domaine non supporté : '{domain}'. "
-                "Seuls TikTok, Instagram et les articles de blog sont acceptés."
-            )
+    # Accept TikTok, Instagram, or any other URL (treated as potential blog)
+    if domain in SUPPORTED_DOMAINS:
+        return url
+    
+    # Everything else is treated as a blog
     return url
 
 
@@ -1041,20 +1041,18 @@ def _download_with_info(
 
 def is_blog_url(url: str) -> bool:
     """
-    Détecte si une URL est un article de blog.
+    Détecte si une URL doit être traitée comme un article de blog.
+    Retourne True pour tout URL qui n'est pas TikTok ou Instagram.
     """
     url_lower = url.lower()
     
-    # Check blog domains
-    for domain in BLOG_DOMAINS:
+    # Check if it's TikTok or Instagram - those are not blogs
+    for domain in SUPPORTED_DOMAINS:
         if domain in url_lower:
-            return True
+            return False
     
-    # Check blog paths
-    if BLOG_PATH_RE.search(url):
-        return True
-    
-    return False
+    # Everything else is treated as a blog
+    return True
 
 
 def extract_blog_content(url: str) -> dict:
