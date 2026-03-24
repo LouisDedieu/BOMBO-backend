@@ -613,49 +613,54 @@ def _download_with_info(
     """
     Télécharge et retourne les métadonnées yt-dlp pour détection de carrousel.
     Retourne (info_dict, success).
-    Utilise --dump-json pour obtenir les métadonnées complètes.
     """
     import json
-    import tempfile
+    import subprocess
     
     has_curl = _curl_cffi_available()
     strategies = _build_strategies(cookies_file, proxy, has_curl)
-    tmp_path = None
     
     for i, strategy in enumerate(strategies, start=1):
-        opts = strategy.build_ydl_opts(output_path)
-        opts['skip_download'] = True
-        opts['dump_single_json'] = True
-        opts['no_warnings'] = True
-        opts['quiet'] = True
-        
         try:
-            with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as tmp:
-                tmp_path = tmp.name
-                opts['outtmpl'] = {'infojson': tmp.name}
+            opts = strategy.build_ydl_opts(output_path)
+            opts['skip_download'] = True
+            opts['dump_single_json'] = True
+            opts['no_warnings'] = True
+            opts['quiet'] = True
+            opts['nocheckcertificate'] = True
             
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+            cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificate']
             
-            with open(tmp_path, 'r') as f:
-                info = json.load(f)
+            if strategy.impersonate:
+                cmd.append(f'--impersonate={strategy.impersonate}')
+            if strategy.cookies_from_browser:
+                cmd.extend(['--cookies-from-browser', strategy.cookies_from_browser])
+            if strategy.cookies_file:
+                cmd.extend(['--cookies', strategy.cookies_file])
+            if strategy.proxy:
+                cmd.extend(['--proxy', strategy.proxy])
             
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+            cmd.append(url)
             
-            if info:
-                logger.debug(f"Métadonnées complètes récupérées, keys: {list(info.keys())[:20]}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            
+            if result.returncode == 0 and result.stdout:
+                info = json.loads(result.stdout.strip().split('\n')[-1])
+                logger.info(f"Métadonnées récupérées (tentative {i})")
                 return info, True
+            elif result.stderr:
+                logger.debug(f"Tentative {i} stderr: {result.stderr[:200]}")
+                
+        except subprocess.TimeoutExpired:
+            logger.debug(f"Tentative {i} timeout")
         except Exception as e:
-            logger.debug("Tentative %d échouée pour info extraction: %s", i, e)
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-            continue
+            logger.debug(f"Tentative {i} exception: {e}")
+        continue
     
     return {}, False
 
