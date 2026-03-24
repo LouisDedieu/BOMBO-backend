@@ -459,14 +459,14 @@ def _resolve_tiktok_url(url: str) -> str | None:
         return url
     
     try:
-        response = httpx.head(url, timeout=10, follow_redirects=True, allow_redirects=True)
+        response = httpx.head(url, timeout=10, follow_redirects=True, )
         final_url = str(response.url)
         logger.info(f"URL résolue : {url} → {final_url}")
         return final_url
     except Exception as e:
         logger.warning(f"Échec résolution URL TikTok: {e}")
         try:
-            response = httpx.get(url, timeout=10, follow_redirects=True, allow_redirects=True)
+            response = httpx.get(url, timeout=10, follow_redirects=True, )
             final_url = str(response.url)
             logger.info(f"URL résolue (GET): {url} → {final_url}")
             return final_url
@@ -1016,11 +1016,6 @@ async def download_content(
     """
     validated_url = validate_url(url)
     logger.info("Téléchargement de %s", validated_url)
-    
-    resolved_url = _resolve_tiktok_url(validated_url)
-    if resolved_url and resolved_url != validated_url:
-        validated_url = resolved_url
-        logger.info("URL résolue: %s", validated_url)
     
     loop = asyncio.get_running_loop()
     video_path = os.path.join(output_dir, "video.mp4")

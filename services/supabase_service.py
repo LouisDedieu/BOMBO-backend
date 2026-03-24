@@ -699,8 +699,8 @@ class SupabaseService:
     # DEDUPLICATION
     # =========================================================================
 
-    async def find_trip_by_source_url(self, normalized_url: str) -> Optional[Dict]:
-        """Cherche un trip existant par normalized_source_url. Retourne {id, trip_title, type} ou None."""
+    async def find_trip_by_source_url(self, source_url: str) -> Optional[Dict]:
+        """Cherche un trip existant par source_url. Retourne {id, trip_title, type} ou None."""
         if not self.is_configured():
             return None
         try:
@@ -708,7 +708,7 @@ class SupabaseService:
                 response = await client.get(
                     self._get_url("trips"),
                     params={
-                        "normalized_source_url": f"eq.{normalized_url}",
+                        "source_url": f"eq.{source_url}",
                         "limit": "1",
                         "select": "id,trip_title",
                     },
@@ -724,8 +724,8 @@ class SupabaseService:
             logger.error(f"Erreur find_trip_by_source_url: {e}")
             return None
 
-    async def find_city_by_source_url(self, normalized_url: str) -> Optional[Dict]:
-        """Cherche une city existante par normalized_source_url. Retourne {id, city_title, type} ou None."""
+    async def find_city_by_source_url(self, source_url: str) -> Optional[Dict]:
+        """Cherche une city existante par source_url. Retourne {id, city_title, type} ou None."""
         if not self.is_configured():
             return None
         try:
@@ -733,7 +733,7 @@ class SupabaseService:
                 response = await client.get(
                     self._get_url("cities"),
                     params={
-                        "normalized_source_url": f"eq.{normalized_url}",
+                        "source_url": f"eq.{source_url}",
                         "limit": "1",
                         "select": "id,city_title",
                     },

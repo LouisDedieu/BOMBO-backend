@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from models.schemas import AnalyzeUrlRequest
 from services.ml_service import ml_service
-from utils.url_normalizer import normalize_url
 from services.supabase_service import SupabaseService
 from services.sse_service import job_manager
 from services.notification_service import NotificationService
@@ -25,6 +24,7 @@ from downloader import (
     IPBlockedError,
     DownloadError,
     VideoTooLongError,
+    _resolve_tiktok_url,
 )
 
 logger = logging.getLogger("bombo.job_processor")
@@ -55,19 +55,31 @@ class JobProcessor:
         tmp_dir: Optional[str] = None
 
         try:
-            # Créer le job dans Supabase
-            if self.supabase.is_configured():
-                await self.supabase.create_job(job_id, request.url, request.user_id)
+            # ── Étape 0.5 : Résolution URL ──────────────────────────────────────
+            # URL résolue complète pour téléchargement et sauvegarde
+            loop = asyncio.get_running_loop()
+            full_url = await loop.run_in_executor(
+                None, _resolve_tiktok_url, request.url
+            )
+            if not full_url:
+                full_url = request.url
+            
+            # Supprimer les query params (ex: ?_r=1&_t=...)
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(full_url)
+            full_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+            
+            logger.info("[job %s] URL complète : %s", job_id, full_url)
 
-            # ── Étape 0.5 : Vérification de doublon ──────────────────────────
-            normalized_url: Optional[str] = None
+            # Créer le job dans Supabase avec l'URL résolue
             if self.supabase.is_configured():
-                normalized_url = await normalize_url(request.url)
-                logger.info("[job %s] URL normalisée : %s", job_id, normalized_url)
+                await self.supabase.create_job(job_id, full_url, request.user_id)
 
-                existing = await self.supabase.find_trip_by_source_url(normalized_url)
+            # ── Étape 0.75 : Vérification de doublon ──────────────────────────
+            if self.supabase.is_configured():
+                existing = await self.supabase.find_trip_by_source_url(full_url)
                 if not existing:
-                    existing = await self.supabase.find_city_by_source_url(normalized_url)
+                    existing = await self.supabase.find_city_by_source_url(full_url)
 
                 if existing:
                     entity_type = existing["type"]
@@ -86,7 +98,7 @@ class JobProcessor:
                             "city_id": new_id if entity_type == "city" else None,
                             "entity_type": entity_type,
                             "duration_seconds": 0,
-                            "source_url": request.url,
+                            "source_url": full_url,
                             "cloned": True,
                             "cloned_from": entity_id,
                         }
@@ -113,7 +125,7 @@ class JobProcessor:
             if self.supabase.is_configured():
                 await self.supabase.update_job(job_id, {"status": "downloading"})
 
-            logger.info("[job %s] Téléchargement de %s", job_id, request.url)
+            logger.info("[job %s] Téléchargement de %s", job_id, full_url)
 
             # Générer un répertoire unique pour le job
             tmp_dir = os.path.join(tempfile.gettempdir(), f"bombo_{job_id}")
@@ -121,7 +133,7 @@ class JobProcessor:
 
             try:
                 download_result = await download_content(
-                    request.url,
+                    full_url,
                     tmp_dir,
                     cookies_file=request.cookies_file or self.default_cookies_file,
                     proxy=request.proxy or self.default_proxy,
@@ -225,10 +237,8 @@ class JobProcessor:
                 await job_manager.send_sse_update(
                     job_id, "analyzing", {"progress": 90, "message": "Sauvegarde..."}
                 )
-                # Ajouter l'URL source et type de contenu au résultat avant de sauvegarder
-                result["source_url"] = request.url
-                if normalized_url:
-                    result["normalized_source_url"] = normalized_url
+                # Ajouter l'URL source (résolue) et type de contenu au résultat avant de sauvegarder
+                result["source_url"] = full_url
                 result["content_type"] = content_type.value
                 result["image_count"] = image_count
 
@@ -251,7 +261,7 @@ class JobProcessor:
                 "image_count": image_count,
                 "duration_seconds": duration,
                 "raw_json": result,
-                "source_url": request.url,
+                "source_url": full_url,
             }
 
             job_manager.update_job_status(job_id, "done", result=response_data)
