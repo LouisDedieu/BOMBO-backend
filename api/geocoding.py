@@ -2,7 +2,9 @@
 api/geocoding.py — Proxy pour les requêtes de géocodage LocationIQ
 Protège la clé API en la gardant côté serveur.
 """
+import asyncio
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -14,6 +16,11 @@ from config import settings
 logger = logging.getLogger("bombo.geocoding")
 
 router = APIRouter(prefix="/geocoding", tags=["geocoding"])
+
+# Rate limiting: LocationIQ free tier = 2 requests/second
+_GEOCODING_DELAY = 0.5  # 500ms between requests
+_last_request_time = 0.0
+_rate_limit_lock = asyncio.Lock()
 
 
 class GeocodingResult(BaseModel):
@@ -35,6 +42,8 @@ async def geocode_search(
     Proxy geocoding requests to LocationIQ API.
     Keeps the API key secure on the server side.
     """
+    global _last_request_time
+    
     api_key = settings.LOCATIONIQ_API_KEY
     if not api_key:
         logger.error("LOCATIONIQ_API_KEY not configured")
@@ -42,6 +51,13 @@ async def geocode_search(
             status_code=500,
             detail="Geocoding service not configured",
         )
+
+    async with _rate_limit_lock:
+        current_time = time.monotonic()
+        elapsed = current_time - _last_request_time
+        if elapsed < _GEOCODING_DELAY:
+            await asyncio.sleep(_GEOCODING_DELAY - elapsed)
+        _last_request_time = time.monotonic()
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

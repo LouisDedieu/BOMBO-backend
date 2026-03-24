@@ -4,6 +4,7 @@ Utilise LocationIQ pour convertir les adresses en coordonnées lat/lon.
 """
 import logging
 import asyncio
+import time
 from typing import Optional, Tuple, List, Dict, Any
 
 import httpx
@@ -15,16 +16,29 @@ logger = logging.getLogger("bombo.services.geocoding")
 # Rate limiting: LocationIQ free tier = 2 requests/second
 GEOCODING_DELAY = 0.5  # 500ms between requests
 
+# Global rate limiter to prevent burst requests
+_last_request_time = 0.0
+_rate_limit_lock = asyncio.Lock()
+
 
 async def geocode_query(query: str, timeout: float = 10.0) -> Optional[Tuple[float, float]]:
     """
     Geocode a single query string using LocationIQ API.
     Returns (latitude, longitude) or None if not found.
     """
+    global _last_request_time
+    
     api_key = settings.LOCATIONIQ_API_KEY
     if not api_key:
         logger.warning("LOCATIONIQ_API_KEY not configured")
         return None
+
+    async with _rate_limit_lock:
+        current_time = time.monotonic()
+        elapsed = current_time - _last_request_time
+        if elapsed < GEOCODING_DELAY:
+            await asyncio.sleep(GEOCODING_DELAY - elapsed)
+        _last_request_time = time.monotonic()
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -84,7 +98,6 @@ async def geocode_highlight(
         if result:
             logger.debug("Geocoded highlight '%s' via address: %s", name, query)
             return result
-        await asyncio.sleep(GEOCODING_DELAY)
 
     # Strategy 2: name + full context
     query = f"{name}, {city_context}"
@@ -92,7 +105,6 @@ async def geocode_highlight(
     if result:
         logger.debug("Geocoded highlight '%s' via name: %s", name, query)
         return result
-    await asyncio.sleep(GEOCODING_DELAY)
 
     # Strategy 3: address + city only (if country was included before)
     if address and country:
@@ -101,7 +113,6 @@ async def geocode_highlight(
         if result:
             logger.debug("Geocoded highlight '%s' via address (no country): %s", name, query)
             return result
-        await asyncio.sleep(GEOCODING_DELAY)
 
     # Strategy 4: name + city only
     if country:
@@ -136,7 +147,6 @@ async def geocode_spot(
         if result:
             logger.debug("Geocoded spot '%s' via address: %s", name, query)
             return result
-        await asyncio.sleep(GEOCODING_DELAY)
 
     # Strategy 2: name + location
     query = f"{name}, {location}"
@@ -199,9 +209,6 @@ async def batch_geocode_highlights(
                     logger.debug("Persisted coordinates for highlight %s", highlight_id)
                 except Exception as e:
                     logger.error("Failed to persist coordinates for highlight %s: %s", highlight_id, e)
-
-        # Rate limiting
-        await asyncio.sleep(GEOCODING_DELAY)
 
     logger.info("Successfully geocoded %d/%d highlights", len(results), len(to_geocode))
     return results
@@ -272,9 +279,6 @@ async def batch_geocode_destinations(
                 except Exception as e:
                     logger.error("Failed to persist coordinates for destination %s: %s", dest_id, e)
 
-        # Rate limiting
-        await asyncio.sleep(GEOCODING_DELAY)
-
     logger.info("Successfully geocoded %d/%d destinations", len(results), len(to_geocode))
     return results
 
@@ -331,9 +335,6 @@ async def batch_geocode_spots(
                     logger.debug("Persisted coordinates for spot %s", spot_id)
                 except Exception as e:
                     logger.error("Failed to persist coordinates for spot %s: %s", spot_id, e)
-
-        # Rate limiting
-        await asyncio.sleep(GEOCODING_DELAY)
 
     logger.info("Successfully geocoded %d/%d spots", len(results), len(to_geocode))
     return results
