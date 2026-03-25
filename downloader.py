@@ -1157,16 +1157,20 @@ async def download_content(
     """
     # Check if it's a blog URL first
     if is_blog_url(url):
-        logger.info("Détection blog URL, extraction du contenu...")
+        logger.info("[DOWNLOAD_BLOG] Starting blog extraction for: %s", url)
         try:
             loop = asyncio.get_running_loop()
             blog_data = await loop.run_in_executor(None, extract_blog_content, url)
             
             # Save content to a text file
             content_file = os.path.join(output_dir, "content.txt")
+            logger.info("[DOWNLOAD_BLOG] Saving content to: %s", content_file)
             with open(content_file, 'w', encoding='utf-8') as f:
                 f.write(f"# {blog_data['title']}\n\n")
                 f.write(blog_data['content'])
+            
+            logger.info("[DOWNLOAD_BLOG] Content saved - title: %s, words: %d, read_time: %d min",
+                blog_data['title'], blog_data['word_count'], blog_data['estimated_read_time'])
             
             return DownloadResult(
                 content_type=ContentType.BLOG,
