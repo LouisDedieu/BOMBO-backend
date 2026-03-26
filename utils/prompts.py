@@ -177,6 +177,8 @@ Rules:
 - vibe_tags maximum 5, only from the allowed list
 - Include EVERY place mentioned in the video
 - is_must_see = true for places the creator emphasizes as essential
+- IMPORTANT: city_title, city_name, and country are REQUIRED strings. If no city is detected, use "N/A" as the value. NEVER use null for these fields.
+- IMPORTANT: The video MUST be about travel/tourism/city guide content. If the video is NOT about travel, set city_title="N/A", city_name="N/A", country="N/A", and return an empty highlights array.
 - Output ONLY the JSON object. No text before or after.
 """
 

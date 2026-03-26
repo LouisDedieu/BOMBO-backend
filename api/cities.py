@@ -195,7 +195,7 @@ async def delete_city(
         .maybe_single() \
         .execute()
 
-    if not res.data:
+    if not res or not res.data:
         raise HTTPException(404, detail={
             "error_code": ErrorCode.CITY_NOT_FOUND,
             "message": get_error_message(ErrorCode.CITY_NOT_FOUND),
