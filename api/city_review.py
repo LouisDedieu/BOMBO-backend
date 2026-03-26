@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from utils.auth import get_current_user_id
 from services.supabase_service import SupabaseService
-from services.geocoding_service import batch_geocode_highlights
+from services.geocoding_service import batch_geocode_highlights, geocode_highlight
 from models.errors import ErrorCode, get_error_message
 
 logger = logging.getLogger("bombo.api.cities_crud")
@@ -275,7 +275,7 @@ async def update_highlight(
     body: HighlightUpdateBody,
     user_id: str = Depends(get_current_user_id),
 ) -> Dict:
-    """Met a jour les champs d'un highlight."""
+    """Met a jour les champs d'un highlight et géocode automatiquement si l'adresse change."""
     sb = _require_supabase()
     _check_highlight_ownership(sb, highlight_id, user_id)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -286,6 +286,57 @@ async def update_highlight(
     valid_categories = ['food', 'culture', 'nature', 'shopping', 'nightlife', 'other']
     if 'category' in payload and payload['category'] not in valid_categories:
         raise HTTPException(400, detail=f"Categorie invalide. Valeurs acceptees: {valid_categories}")
+
+    # Récupérer le highlight actuel pour avoir le contexte de la ville
+    current_highlight = sb.from_("city_highlights") \
+        .select("id, address, name, city_id") \
+        .eq("id", highlight_id) \
+        .maybe_single() \
+        .execute()
+
+    if not current_highlight or not current_highlight.data:
+        raise HTTPException(404, detail={
+            "error_code": ErrorCode.HIGHLIGHT_NOT_FOUND,
+            "message": get_error_message(ErrorCode.HIGHLIGHT_NOT_FOUND),
+        })
+
+    current_address = current_highlight.data.get("address")
+    new_address = payload.get("address")
+
+    logger.info(f"[DEBUG] update_highlight - highlight_id={highlight_id}, current_address={current_address}, new_address={new_address}")
+
+    # Géocodage automatique si l'adresse a changé
+    if new_address and new_address != current_address:
+        logger.info(f"[DEBUG] Address changed, will geocode")
+        city_id = current_highlight.data.get("city_id")
+        # Récupérer les infos de la ville pour le contexte
+        city_res = sb.from_("cities") \
+            .select("city_name, country") \
+            .eq("id", city_id) \
+            .maybe_single() \
+            .execute()
+
+        if city_res and city_res.data:
+            city_name = city_res.data.get("city_name", "")
+            country = city_res.data.get("country")
+            name = current_highlight.data.get("name", "")
+
+            logger.debug(f"[DEBUG] Geocoding with city_name={city_name}, country={country}, name={name}, address={new_address}")
+
+            # Géocoder la nouvelle adresse
+            coords = await geocode_highlight(
+                name=name,
+                address=new_address,
+                city_name=city_name,
+                country=country
+            )
+
+            logger.info(f"[DEBUG] Geocoding result: {coords}")
+
+            if coords:
+                payload["latitude"] = coords[0]
+                payload["longitude"] = coords[1]
+                logger.info(f"Auto-geocoded highlight {highlight_id}: {coords}")
 
     sb.from_("city_highlights").update(payload).eq("id", highlight_id).execute()
     return {"updated": True}

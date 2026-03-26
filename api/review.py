@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from utils.auth import get_current_user_id
 from services.supabase_service import SupabaseService
-from services.geocoding_service import batch_geocode_spots, batch_geocode_destinations
+from services.geocoding_service import batch_geocode_spots, batch_geocode_destinations, geocode_spot
 from models.errors import ErrorCode, get_error_message
 from models.spot_types import validate_spot_type
 
@@ -584,12 +584,77 @@ async def update_spot(
     body: SpotUpdateBody,
     user_id: str = Depends(get_current_user_id),
 ) -> Dict:
-    """Met à jour les champs d'un spot."""
+    """Met à jour les champs d'un spot et géocode automatiquement si l'adresse change."""
     sb = _require_supabase()
     _check_spot_ownership(sb, spot_id, user_id)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     if not payload:
         return {"updated": False}
+
+    # Récupérer le spot actuel pour avoir le contexte du jour
+    current_spot = sb.from_("spots") \
+        .select("id, address, name, itinerary_day_id") \
+        .eq("id", spot_id) \
+        .maybe_single() \
+        .execute()
+
+    if not current_spot or not current_spot.data:
+        raise HTTPException(404, detail={
+            "error_code": ErrorCode.SPOT_NOT_FOUND,
+            "message": get_error_message(ErrorCode.SPOT_NOT_FOUND),
+        })
+
+    current_address = current_spot.data.get("address")
+    new_address = payload.get("address")
+
+    logger.info(f"[DEBUG] update_spot - spot_id={spot_id}, current_address={current_address}, new_address={new_address}")
+
+    # Géocodage automatique si l'adresse a changé
+    if new_address and new_address != current_address:
+        logger.info(f"[DEBUG] Address changed, will geocode")
+        day_id = current_spot.data.get("itinerary_day_id")
+        if day_id:
+            # Récupérer le jour et sa destination pour le contexte
+            day_res = sb.from_("itinerary_days") \
+                .select("id, location, destination_id") \
+                .eq("id", day_id) \
+                .maybe_single() \
+                .execute()
+
+            if day_res and day_res.data:
+                location = day_res.data.get("location", "")
+                dest_id = day_res.data.get("destination_id")
+
+                # Si on a une destination, récupérer le pays pour le fallback
+                country = None
+                if dest_id:
+                    dest_res = sb.from_("destinations") \
+                        .select("country") \
+                        .eq("id", dest_id) \
+                        .maybe_single() \
+                        .execute()
+                    if dest_res and dest_res.data:
+                        country = dest_res.data.get("country")
+
+                name = current_spot.data.get("name", "")
+
+                logger.info(f"[DEBUG] Geocoding with location={location}, country={country}, name={name}, address={new_address}")
+
+                # Géocoder la nouvelle adresse
+                coords = await geocode_spot(
+                    name=name,
+                    address=new_address,
+                    location=location,
+                    fallback_country=country
+                )
+
+                logger.info(f"[DEBUG] Geocoding result: {coords}")
+
+                if coords:
+                    payload["latitude"] = coords[0]
+                    payload["longitude"] = coords[1]
+                    logger.info(f"Auto-geocoded spot {spot_id}: {coords}")
+
     sb.from_("spots").update(payload).eq("id", spot_id).execute()
     return {"updated": True}
 
