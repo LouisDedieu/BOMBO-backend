@@ -409,7 +409,13 @@ class SupabaseService:
                     },
                 )
 
-            logger.info(f"Trip {trip_id} complètement créé dans Supabase ✓")
+            # Auto-save: ajouter à user_saved_trips
+            _sb_insert("user_saved_trips", {
+                "user_id": user_id,
+                "trip_id": trip_id,
+            })
+
+            logger.info(f"Trip {trip_id} complètement créé dans Supabase ✓ (auto-sauvegardé)")
             return trip_id
 
         try:
@@ -723,7 +729,13 @@ class SupabaseService:
                     },
                 )
 
-            logger.info(f"City {city_id} complètement créée dans Supabase ✓")
+            # Auto-save: ajouter à user_saved_cities
+            _sb_insert("user_saved_cities", {
+                "user_id": user_id,
+                "city_id": city_id,
+            })
+
+            logger.info(f"City {city_id} complètement créée dans Supabase ✓ (auto-sauvegardée)")
             return city_id
 
         try:
