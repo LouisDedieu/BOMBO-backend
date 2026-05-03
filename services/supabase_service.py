@@ -201,6 +201,8 @@ class SupabaseService:
             # 2. Destinations — on conserve un mapping city (lower) → destination_id
             #    pour pouvoir relier les itinerary_days à leur destination sans matching flou côté front
             city_to_dest_id: dict[str, str] = {}
+            destinations_created = 0
+            first_dest_id: str | None = None
             for dest in trip_data.get("destinations", []):
                 dest_row = _sb_insert(
                     "destinations",
@@ -212,13 +214,17 @@ class SupabaseService:
                         "visit_order": dest.get("order", 0),
                     },
                 )
-                if dest_row.get("id") and dest.get("city"):
-                    city_to_dest_id[dest["city"].lower().strip()] = dest_row["id"]
+                if dest_row.get("id"):
+                    destinations_created += 1
+                    if first_dest_id is None:
+                        first_dest_id = dest_row["id"]
+                    if dest.get("city"):
+                        city_to_dest_id[dest["city"].lower().strip()] = dest_row["id"]
 
             logger.info(f"city_to_dest_id: {city_to_dest_id}")
 
-            # Fallback: si aucune destination, créer une destination basée sur le trip_title
-            if not city_to_dest_id:
+            # Fallback: si aucune destination créée, créer une destination basée sur le trip_title
+            if destinations_created == 0:
                 # Extraire le nom de ville du trip_title (ex: "5 day itinerary CRETE" -> "CRETE")
                 trip_title = trip_data.get("trip_title", "")
                 # Essayer d'extraire une ville du titre
@@ -248,7 +254,7 @@ class SupabaseService:
                     logger.info(f"Destination fallback créée: {dest_row['id']} ({city_name})")
 
             # 3. Itinéraire
-            fallback_dest_id = city_to_dest_id.get("inconnu") or (list(city_to_dest_id.values())[0] if city_to_dest_id else None)
+            fallback_dest_id = city_to_dest_id.get("inconnu") or (list(city_to_dest_id.values())[0] if city_to_dest_id else first_dest_id)
             for day_data in trip_data.get("itinerary", []):
                 location = day_data.get("location")
                 # Utiliser la destination correspondante, ou le fallback "Inconnu" si aucun match

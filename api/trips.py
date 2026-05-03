@@ -295,7 +295,7 @@ async def delete_trip(
     sb = _require_supabase()
     # Vérifier ownership et récupérer job_id
     res = sb.from_("trips").select("id, job_id").eq("id", trip_id).eq("user_id", user_id).maybe_single().execute()
-    if not res.data:
+    if not res or not res.data:
         raise HTTPException(404, detail={
             "error_code": ErrorCode.TRIP_NOT_FOUND,
             "message": get_error_message(ErrorCode.TRIP_NOT_FOUND),
